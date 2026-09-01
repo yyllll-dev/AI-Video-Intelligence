@@ -1,242 +1,92 @@
 from src.event.engine import EventEngine
+from src.event.event_types import (
+    EVENT_LEAVE_STUDY_POSITION,
+    EVENT_READING,
+    EVENT_SIT_AT_STUDY_POSITION,
+    EVENT_START_STUDY,
+    EVENT_STUDY_PREPARATION,
+)
 from src.event.schemas import TrackingResult
 
 
-def make_result(
-    timestamp,
-    track_id,
-    class_name,
-    confidence=0.95,
-):
+def make_result(timestamp, track_id, class_name, bbox=None, confidence=0.95):
     return TrackingResult(
         frame_id=int(timestamp * 30),
         timestamp=timestamp,
         track_id=track_id,
         class_name=class_name,
         confidence=confidence,
-        bbox=[100, 100, 300, 500],
+        bbox=bbox or [100, 100, 300, 500],
     )
 
 
-def run_frame(engine, timestamp, objects):
-
-    results = [
-        make_result(
-            timestamp,
-            track_id,
-            class_name,
-        )
-        for track_id, class_name in objects
+def study_position_frame(timestamp, extra_objects=None):
+    objects = [
+        make_result(timestamp, 1, "person", [100, 100, 300, 500]),
+        make_result(timestamp, 2, "chair", [120, 240, 320, 560]),
     ]
-
-    events = engine.update(results)
-
-    for event in events:
-
-        print(
-            f"[{event.start_time:5.1f}s"
-            f" -> {event.end_time:5.1f}s] "
-            f"{event.event_type:22s} "
-            f"{event.description}"
-        )
+    objects.extend(extra_objects or [])
+    return objects
 
 
-def main():
+def event_types(events):
+    return [event.event_type for event in events]
 
+
+def test_emits_sit_at_study_position_after_duration():
     engine = EventEngine()
 
-    print("=" * 70)
-    print("Event Engine Test")
-    print("=" * 70)
+    assert engine.update(study_position_frame(0.0), timestamp=0.0) == []
+    events = engine.update(study_position_frame(2.0), timestamp=2.0)
 
-    # =====================================================
-    # 1. 学生进入学习区域
-    # =====================================================
+    assert event_types(events) == [EVENT_SIT_AT_STUDY_POSITION]
+    assert events[0].track_id == 1
+    assert events[0].start_time == 0.0
+    assert events[0].end_time == 2.0
 
-    run_frame(
-        engine,
-        0,
-        [
-            (1, "person"),
-        ],
+
+def test_emits_study_flow_and_reading_when_activity_changes():
+    engine = EventEngine()
+
+    engine.update(study_position_frame(0.0), timestamp=0.0)
+    engine.update(study_position_frame(2.0), timestamp=2.0)
+
+    events = engine.update(
+        study_position_frame(
+            3.0,
+            [make_result(3.0, 3, "book", [330, 250, 420, 330])],
+        ),
+        timestamp=3.0,
     )
+    assert event_types(events) == [EVENT_STUDY_PREPARATION]
 
-    # =====================================================
-    # 2. 学生开始阅读
-    # =====================================================
-
-    run_frame(
-        engine,
-        1,
-        [
-            (1, "person"),
-            (2, "book"),
-        ],
+    events = engine.update(
+        study_position_frame(
+            6.0,
+            [make_result(6.0, 3, "book", [330, 250, 420, 330])],
+        ),
+        timestamp=6.0,
     )
+    assert event_types(events) == [EVENT_START_STUDY]
 
-    run_frame(
-        engine,
-        2,
-        [
-            (1, "person"),
-            (2, "book"),
-        ],
+    events = engine.update(
+        study_position_frame(
+            7.0,
+            [make_result(7.0, 4, "pen", [330, 250, 360, 280])],
+        ),
+        timestamp=7.0,
     )
-
-    run_frame(
-        engine,
-        3,
-        [
-            (1, "person"),
-            (2, "book"),
-        ],
-    )
-
-    # =====================================================
-    # 3. 学生拿起手机
-    # =====================================================
-
-    run_frame(
-        engine,
-        5,
-        [
-            (1, "person"),
-            (3, "cell phone"),
-        ],
-    )
-
-    # =====================================================
-    # 4. 持续使用手机
-    # =====================================================
-
-    run_frame(
-        engine,
-        6,
-        [
-            (1, "person"),
-            (3, "cell phone"),
-        ],
-    )
-
-    run_frame(
-        engine,
-        7,
-        [
-            (1, "person"),
-            (3, "cell phone"),
-        ],
-    )
-
-    run_frame(
-        engine,
-        8,
-        [
-            (1, "person"),
-            (3, "cell phone"),
-        ],
-    )
-
-    run_frame(
-        engine,
-        9,
-        [
-            (1, "person"),
-            (3, "cell phone"),
-        ],
-    )
-
-    run_frame(
-        engine,
-        10,
-        [
-            (1, "person"),
-            (3, "cell phone"),
-        ],
-    )
-
-    # =====================================================
-    # 5. 学生放下手机
-    # =====================================================
-
-    run_frame(
-        engine,
-        12,
-        [
-            (1, "person"),
-        ],
-    )
-
-    # =====================================================
-    # 6. 回到学习
-    # =====================================================
-
-    run_frame(
-        engine,
-        13,
-        [
-            (1, "person"),
-            (2, "book"),
-        ],
-    )
-
-    run_frame(
-        engine,
-        14,
-        [
-            (1, "person"),
-            (2, "book"),
-        ],
-    )
-
-    # =====================================================
-    # 7. 学生开始使用电脑学习
-    # =====================================================
-
-    run_frame(
-        engine,
-        15,
-        [
-            (1, "person"),
-            (4, "laptop"),
-        ],
-    )
-
-    run_frame(
-        engine,
-        16,
-        [
-            (1, "person"),
-            (4, "laptop"),
-        ],
-    )
-
-    # =====================================================
-    # 8. 学生离开学习区域
-    # =====================================================
-
-    # 17 秒：最后看到学生
-    run_frame(
-        engine,
-        17,
-        [
-            (1, "person"),
-        ],
-    )
-
-    # 这里用一个非 person 目标提供时间戳
-    # 模拟学生已经离开
-    run_frame(
-        engine,
-        22,
-        [
-            (99, "chair"),
-        ],
-    )
-
-    print("=" * 70)
-    print("Event Engine Test Finished")
-    print("=" * 70)
+    assert event_types(events) == [EVENT_READING]
 
 
-if __name__ == "__main__":
-    main()
+def test_emits_leave_study_position_after_absence_duration():
+    engine = EventEngine()
+
+    engine.update(study_position_frame(0.0), timestamp=0.0)
+    engine.update(study_position_frame(2.0), timestamp=2.0)
+
+    assert engine.update([], timestamp=3.0) == []
+    events = engine.update([], timestamp=4.0)
+
+    assert event_types(events) == [EVENT_LEAVE_STUDY_POSITION]
+    assert events[0].track_id == 1

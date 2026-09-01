@@ -216,3 +216,30 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ============================================================
+# AI-Video-Intelligence project
+# ============================================================
+
+# Local model weights
+models/*.pt
+models/*.pth
+models/*.onnx
+models/*.safetensors
+
+# Local test / raw media
+data/raw/*
+!data/raw/.gitkeep
+
+data/screenshots/
+data/clips/
+
+# Model caches
+.cache/
+.huggingface/
+modelscope_cache/
+**/.cache/
+
+# Local logs
+*.log
+

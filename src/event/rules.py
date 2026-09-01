@@ -1,24 +1,72 @@
-# 基础事件持续时间
-ENTER_STUDY_DURATION = 1.0
-LEAVE_STUDY_DURATION = 2.0
+"""学习场景事件判断规则
 
-START_STUDY_DURATION = 3.0
+本文件统一定义 EventEngine 使用的时间阈值。
+"""
+
+
+# ============================================================
+# 学习位置
+# ============================================================
+
+# 连续检测到人物位于学习位置的时间，
+# 达到该时间后认为“坐到学习位置”
+SIT_AT_STUDY_POSITION_MIN_DURATION = 2.0
+
+# 人物离开学习位置后，持续达到该时间才认为真正离开
+LEAVE_STUDY_POSITION_MIN_DURATION = 2.0
+
+
+# ============================================================
+# 学习流程
+# ============================================================
+
+# 学习准备行为的最短持续时间
+STUDY_PREPARATION_MIN_DURATION = 1.0
+
+# 判定正式开始学习所需的最短持续时间
+START_STUDY_MIN_DURATION = 3.0
+
+# 判定结束学习所需的持续时间
+END_STUDY_MIN_DURATION = 3.0
+
+
+# ============================================================
+# 学习行为
+# ============================================================
+
+# 阅读最短持续时间
 READING_MIN_DURATION = 3.0
+
+# 书写最短持续时间
 WRITING_MIN_DURATION = 2.0
 
-COMPUTER_USAGE_MIN_DURATION = 3.0
-PHONE_USAGE_MIN_DURATION = 2.0
+# 手机学习最短持续时间
+PHONE_LEARNING_MIN_DURATION = 3.0
 
-PICK_UP_PHONE_WINDOW = 1.5
-PUT_DOWN_PHONE_WINDOW = 1.5
+# 电脑学习最短持续时间
+COMPUTER_LEARNING_MIN_DURATION = 3.0
 
-# 状态转换
-SWITCH_TO_PHONE_MIN_DURATION = 2.0
-RETURN_TO_STUDY_MIN_DURATION = 2.0
+# 其他学习行为最短持续时间
+OTHER_STUDY_BEHAVIOR_MIN_DURATION = 3.0
 
-# 高级事件
-STUDY_INTERRUPTION_MIN_DURATION = 5.0
-LONG_PHONE_USAGE_DURATION = 30.0
-LONG_ABSENCE_DURATION = 30.0
 
-COMPUTER_LEARNING_MIN_DURATION = 5.0
+# ============================================================
+# 分心行为
+# ============================================================
+
+# 手机分心最短持续时间
+PHONE_DISTRACTION_MIN_DURATION = 2.0
+
+# 电脑分心最短持续时间
+COMPUTER_DISTRACTION_MIN_DURATION = 3.0
+
+# 交流分心最短持续时间
+COMMUNICATION_DISTRACTION_MIN_DURATION = 3.0
+
+
+# ============================================================
+# 学习结束整理
+# ============================================================
+
+# 学习结束整理最短持续时间
+STUDY_END_CLEANUP_MIN_DURATION = 2.0

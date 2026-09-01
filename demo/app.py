@@ -170,11 +170,20 @@ button.btn-secondary:hover { background: var(--brand-soft) !important; }
 # ============ 事件类型中文映射 ============
 
 EVENT_LABELS = {
-    "phone_usage": "玩手机",
+    "sit_at_study_position": "坐到学习位置",
+    "leave_study_position": "离开学习位置",
+    "study_preparation": "学习准备",
     "start_study": "开始学习",
-    "open_book": "打开书",
-    "writing": "写字",
-    "leave_study": "离开学习",
+    "end_study": "结束学习",
+    "reading": "阅读",
+    "writing": "书写",
+    "phone_learning": "手机学习",
+    "computer_learning": "电脑学习",
+    "other_study_behavior": "其他学习行为",
+    "phone_distraction": "手机分心",
+    "computer_distraction": "电脑分心",
+    "communication_distraction": "交流分心",
+    "study_end_cleanup": "学习结束整理",
 }
 
 
@@ -215,8 +224,8 @@ def status_html(state: str) -> str:
 def current_event_html() -> str:
     return (
         '<div class="event-card">'
-        '<div class="event-name">玩手机</div>'
-        '<div class="event-meta">phone_usage · #1 · 置信度 0.91</div>'
+        '<div class="event-name">手机分心</div>'
+        '<div class="event-meta">phone_distraction · #1 · 置信度 0.91</div>'
         '<div class="event-time">10:32:15 → 10:32:23</div>'
         '</div>'
     )
@@ -225,8 +234,8 @@ def current_event_html() -> str:
 def timeline_html() -> str:
     items = [
         ("10:28:05", "writing", False),
-        ("10:30:11", "open_book", False),
-        ("10:32:15", "phone_usage", True),
+        ("10:30:11", "reading", False),
+        ("10:32:15", "phone_distraction", True),
     ]
     rows = []
     for t, etype, is_current in items:
@@ -247,18 +256,18 @@ def analysis_html() -> str:
     return (
         '<div class="card">'
         '<div class="analysis-section">实时检测<span class="badge live">LIVE</span></div>'
-        '<div class="analysis-detect">person ×1 · phone ×1 · book ×1</div>'
+        '<div class="analysis-detect">person ×1 · cell phone ×1 · book ×1</div>'
         '<div class="analysis-section">语义理解<span class="badge trigger">事件触发</span></div>'
-        '<div class="analysis-caption">画面中一名学生正低头看手机，桌面上摊开一本书。</div>'
+        '<div class="analysis-caption">画面中一名学生正低头查看手机，桌面上有学习资料。</div>'
         '</div>'
     )
 
 
 # 整块结果列表（列：时间戳 / 事件 / 描述 / 视频片段）
 FAKE_RESULTS = [
-    ["10:32:15", "玩手机", "学生拿起手机看", "segment_632.mp4"],
-    ["09:14:02", "写字", "正在写作业", "segment_140.mp4"],
-    ["09:05:30", "开始学习", "学生坐到书桌前", "segment_055.mp4"],
+    ["10:32:15", "手机分心", "学生拿起手机并查看手机内容", "segment_632.mp4"],
+    ["09:14:02", "书写", "学生正在书写", "segment_140.mp4"],
+    ["09:05:30", "开始学习", "学生开始学习", "segment_055.mp4"],
 ]
 
 RESULT_HEADERS = ["时间戳", "事件", "描述", "视频片段"]

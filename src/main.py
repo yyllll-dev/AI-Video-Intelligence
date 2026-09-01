@@ -1,4 +1,4 @@
-from pipeline.pipeline import VideoPipeline
+from src.pipeline.pipeline import VideoPipeline
 
 
 def main():
