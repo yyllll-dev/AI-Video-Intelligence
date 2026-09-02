@@ -1,22 +1,35 @@
 """AI 学习视频智能记忆系统 —— 界面
 
 分工：E 王彦如 —— UI + Replay + README + Demo
-本文件：demo/app.py —— Day 1：搭 UI 框架，使用假数据，不接后端。
+本文件：demo/app.py —— 界面主文件，调用 demo/core/ 里的事件映射与模拟数据。
 
 视觉设计：白底 + 蓝色点缀，内联 SVG 图标（Lucide 风格），卡片化布局。
-运行语义（与团队对齐）：
-    - 视频源（摄像头 / 本地文件）统一作为「帧流」处理
-    - 「检测到」（YOLO）逐帧实时变 → AI Analysis 上段
-    - 「语义理解」（Qwen-VL）事件触发才变 → AI Analysis 下段
-    - Current Event / 时间线由事件引擎随播放进度逐步生成
 
-后续接线点（Day 2~7）：
-    - LIVE VIDEO  ← C(检测追踪)：frame + bbox
-    - Current Event ← A(事件引擎)：event_type / track_id / time / confidence
-    - 搜索结果 / 回放 ← D(记忆检索)：event / timestamp / caption / video 路径
+展示链路（对齐团队「明日任务安排」PDF 的验收标准）：
+    视频/画面 → 当前检测到的人 → 当前事件 → 事件时间 → VLM 分析结果
+    → 历史事件记录列表 → 简单自然语言检索
+
+当前状态：UI 结构就位，数据来自 demo/core/mock_data.py（假数据）。
+后续接入：把 mock_data 里的函数替换成对 src/ 真实模块的调用即可，UI 无需改动。
 """
 
+import os
+import sys
+
+# 确保 demo/ 在 sys.path，使 `from core import ...` 无论从哪运行都生效
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import gradio as gr
+
+from core import (
+    event_label,
+    class_label,
+    mock_detections,
+    mock_current_event,
+    mock_timeline,
+    mock_vlm_result,
+    mock_search,
+)
 
 # ============ SVG 图标（Lucide 风格，内联 stroke 图标） ============
 
@@ -110,7 +123,7 @@ CSS = """
 .event-time { color: var(--ink); font-size: 13px; margin-top: 8px;
               font-variant-numeric: tabular-nums; }
 
-/* 时间线 */
+/* 历史事件记录列表 */
 .timeline { padding: 2px 0; }
 .timeline-item { display: flex; align-items: flex-start; gap: 9px;
                  padding: 6px 0; font-size: 13px; color: var(--ink); }
@@ -167,31 +180,7 @@ button.btn-secondary:hover { background: var(--brand-soft) !important; }
 """
 
 
-# ============ 事件类型中文映射 ============
-
-EVENT_LABELS = {
-    "sit_at_study_position": "坐到学习位置",
-    "leave_study_position": "离开学习位置",
-    "study_preparation": "学习准备",
-    "start_study": "开始学习",
-    "end_study": "结束学习",
-    "reading": "阅读",
-    "writing": "书写",
-    "phone_learning": "手机学习",
-    "computer_learning": "电脑学习",
-    "other_study_behavior": "其他学习行为",
-    "phone_distraction": "手机分心",
-    "computer_distraction": "电脑分心",
-    "communication_distraction": "交流分心",
-    "study_end_cleanup": "学习结束整理",
-}
-
-
-def event_label(event_type: str) -> str:
-    return EVENT_LABELS.get(event_type, event_type)
-
-
-# ============ HTML 片段（假数据） ============
+# ============ HTML 片段 ============
 
 def app_header() -> str:
     return (
@@ -221,31 +210,40 @@ def status_html(state: str) -> str:
     )
 
 
+def detection_summary() -> str:
+    """把检测结果聚合成「人 ×1 · 手机 ×1 · 书 ×1」这样的摘要。"""
+    counts = {}
+    for d in mock_detections():
+        name = class_label(d["class_name"])
+        counts[name] = counts.get(name, 0) + 1
+    return " · ".join(f"{name} ×{n}" for name, n in counts.items())
+
+
 def current_event_html() -> str:
+    e = mock_current_event()
+    name = event_label(e["event_type"])
     return (
         '<div class="event-card">'
-        '<div class="event-name">手机分心</div>'
-        '<div class="event-meta">phone_distraction · #1 · 置信度 0.91</div>'
-        '<div class="event-time">10:32:15 → 10:32:23</div>'
+        f'<div class="event-name">{name}</div>'
+        f'<div class="event-meta">{e["event_type"]} · #{e["track_id"]} · 置信度 {e["confidence"]}</div>'
+        f'<div class="event-time">{e["start_time"]} → {e["end_time"]}</div>'
         '</div>'
     )
 
 
 def timeline_html() -> str:
-    items = [
-        ("10:28:05", "writing", False),
-        ("10:30:11", "reading", False),
-        ("10:32:15", "phone_distraction", True),
-    ]
+    """历史事件记录列表（时间 + 事件），最后一条为当前事件。"""
+    items = mock_timeline()
     rows = []
-    for t, etype, is_current in items:
+    for i, (t, label) in enumerate(items):
+        is_current = i == len(items) - 1
         cls = "current" if is_current else "past"
         tag = '<span class="timeline-tag">当前</span>' if is_current else ""
         rows.append(
             '<div class="timeline-item">'
             f'<span class="timeline-dot {cls}"></span>'
             f'<span class="timeline-time">{t}</span>'
-            f'<span class="timeline-label">{event_label(etype)}{tag}</span>'
+            f'<span class="timeline-label">{label}{tag}</span>'
             '</div>'
         )
     return '<div class="timeline">' + "".join(rows) + "</div>"
@@ -256,28 +254,22 @@ def analysis_html() -> str:
     return (
         '<div class="card">'
         '<div class="analysis-section">实时检测<span class="badge live">LIVE</span></div>'
-        '<div class="analysis-detect">person ×1 · cell phone ×1 · book ×1</div>'
+        f'<div class="analysis-detect">{detection_summary()}</div>'
         '<div class="analysis-section">语义理解<span class="badge trigger">事件触发</span></div>'
-        '<div class="analysis-caption">画面中一名学生正低头查看手机，桌面上有学习资料。</div>'
+        f'<div class="analysis-caption">{mock_vlm_result()}</div>'
         '</div>'
     )
 
 
 # 整块结果列表（列：时间戳 / 事件 / 描述 / 视频片段）
-FAKE_RESULTS = [
-    ["10:32:15", "手机分心", "学生拿起手机并查看手机内容", "segment_632.mp4"],
-    ["09:14:02", "书写", "学生正在书写", "segment_140.mp4"],
-    ["09:05:30", "开始学习", "学生开始学习", "segment_055.mp4"],
-]
-
 RESULT_HEADERS = ["时间戳", "事件", "描述", "视频片段"]
 
 
-# ============ 回调（Day 1 假逻辑，后续接 A/D） ============
+# ============ 回调（后续接 A/D 真实模块） ============
 
 def on_search(query: str):
-    """Day 1 返回固定假结果；Day 5 替换为调用 D 的检索接口。"""
-    return FAKE_RESULTS
+    """检索回调：当前返回假数据，接入 D 后替换为真实 search(query)。"""
+    return mock_search(query)
 
 
 def on_select(evt: gr.SelectData):
@@ -288,11 +280,11 @@ def on_select(evt: gr.SelectData):
 
 
 def on_replay(seg_path):
-    """回放选中片段（Day 6 接 D 返回的视频片段路径，用播放器播）。"""
+    """回放选中片段（接入 D 后播放真实的视频片段路径）。"""
     if not seg_path:
         gr.Warning("请先在结果列表中点击选中一条记录")
     else:
-        gr.Info(f"回放功能将在 Day 6 接入，选中片段：{seg_path}")
+        gr.Info(f"回放功能将在接入 D 后可用，选中片段：{seg_path}")
 
 
 def on_start() -> str:
@@ -331,19 +323,19 @@ def build_ui() -> gr.Blocks:
                 gr.HTML(section_title("activity", "AI Analysis 分析"))
                 gr.HTML(analysis_html())
 
-            # ---- 右列（窄）：当前事件 + 时间线 ----
+            # ---- 右列（窄）：当前事件 + 历史事件记录列表 ----
             with gr.Column(scale=1):
                 gr.HTML(section_title("zap", "当前事件 Current Event"))
                 gr.HTML(current_event_html())
 
-                gr.HTML(section_title("clock", "近期事件时间线"))
+                gr.HTML(section_title("clock", "历史事件记录"))
                 gr.HTML(timeline_html())
 
         # ---- 搜索区 ----
         gr.HTML(section_title("search", "问问你的学习记忆"))
         with gr.Row():
             query = gr.Textbox(
-                placeholder="例如：什么时候有人玩手机？",
+                placeholder="例如：刚才什么时候玩手机了？",
                 label=None,
                 scale=4,
             )
@@ -358,7 +350,7 @@ def build_ui() -> gr.Blocks:
         )
         results = gr.Dataframe(
             headers=RESULT_HEADERS,
-            value=FAKE_RESULTS,
+            value=mock_search(""),
             interactive=True,
             wrap=True,
         )
