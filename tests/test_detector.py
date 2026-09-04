@@ -92,6 +92,14 @@ def test_detector_missing_model_raises_clear_error():
         assert "yolo11n.pt" in str(e) or "models/" in str(e)
 
 
+def test_detector_is_directly_callable_by_pipeline():
+    detector = YoloDetector.__new__(YoloDetector)
+    expected = []
+    detector.detect = lambda _frame: expected
+
+    assert detector(object()) is expected
+
+
 # ============ 连续帧检测测试（模型存在时运行） ============
 
 def test_detector_detects_on_continuous_video():

@@ -17,6 +17,7 @@ import tempfile
 
 import cv2
 import numpy as np
+import pytest
 
 # 保证从仓库根目录可直接导入 src 包（项目尚未安装为包）
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -95,6 +96,26 @@ def test_video_file_source_ends_with_none():
             assert src.read() is None
 
 
+def test_ten_second_video_uses_frame_timeline():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "ten_seconds.mp4")
+        _make_test_video(path, frames=100, fps=10.0)
+        with VideoFileSource(path) as src:
+            frames = []
+            while True:
+                frame = src.read()
+                if frame is None:
+                    break
+                frames.append(frame)
+
+        assert len(frames) == 100
+        assert frames[-1].timestamp == pytest.approx(9.9)
+        assert all(
+            current.timestamp > previous.timestamp
+            for previous, current in zip(frames, frames[1:])
+        )
+
+
 # ============ 摄像头输入测试（无摄像头则跳过） ============
 
 def test_camera_source_outputs_unified_frames():
@@ -141,8 +162,11 @@ def test_open_source_unified_entry():
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "test.mp4")
         _make_test_video(path, frames=2)
-        assert isinstance(open_source(0), CameraSource)
         assert isinstance(open_source(path), VideoFileSource)
+        if not _has_camera():
+            pytest.skip("本机无可用摄像头")
+        with open_source(0) as camera_source:
+            assert isinstance(camera_source, CameraSource)
 
 
 def test_two_sources_output_same_frame_object():

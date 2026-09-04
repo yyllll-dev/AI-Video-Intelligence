@@ -127,9 +127,9 @@ class VideoFileSource(VideoSource):
         if frame is None:
             return None
         h, w = frame.shape[:2]
-        # 优先用视频真实播放位置（兼容可变帧率视频），取不到时退化为 帧号/帧率
-        pos_msec = self._cap.get(cv2.CAP_PROP_POS_MSEC)
-        timestamp = pos_msec / 1000.0 if pos_msec and pos_msec > 0 else self._frame_id / self._fps
+        # 使用帧序号和视频 FPS 构造稳定、单调的文件时间轴。
+        # 部分 MP4 解码器返回的 CAP_PROP_POS_MSEC 会跳变或远超实际时长。
+        timestamp = self._frame_id / self._fps
         video_frame = VideoFrame(
             frame=frame,
             frame_id=self._frame_id,

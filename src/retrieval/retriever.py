@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, Protocol
 
 from .embedding import EmbeddingProvider, cosine_similarity
+from .event_catalog import build_event_embedding_text, match_event_type
 from .memory import MemoryStore
 from .models import EventLike, MemoryRecord, SearchResult
 
@@ -31,6 +33,24 @@ class IdentityQueryProcessor:
         return normalized
 
 
+class EventQueryProcessor:
+    """把常见中文问题补充为正式事件名称，再交给 Embedding。
+
+    这里只做轻量、可解释的查询规范化。以后接入 Qwen 查询改写时，仍然只需
+    提供同一个 ``process(query) -> str`` 接口，不需要修改检索主流程。
+    """
+
+    def process(self, query: str) -> str:
+        normalized = query.strip()
+        if not normalized:
+            raise ValueError("query 不能为空")
+
+        event_type = match_event_type(normalized)
+        if event_type is None:
+            return normalized
+        return build_event_embedding_text(event_type, normalized)
+
+
 class VideoMemoryService:
     """高嘉沐模块对外提供的统一服务。"""
 
@@ -42,7 +62,7 @@ class VideoMemoryService:
     ) -> None:
         self._store = store
         self._embedder = embedder
-        self._query_processor = query_processor or IdentityQueryProcessor()
+        self._query_processor = query_processor or EventQueryProcessor()
 
     def remember_event(
         self,
@@ -56,8 +76,11 @@ class VideoMemoryService:
         """接收 A/B 模块事件，生成向量并保存为一条视频记忆。"""
 
         memory_caption = (caption or event.description or event.event_type).strip()
-        embedding_text = f"事件类型：{event.event_type}；事件描述：{memory_caption}"
-        embedding = self._embedder.encode(embedding_text)
+        embedding_text = build_event_embedding_text(
+            event.event_type,
+            memory_caption,
+        )
+        embedding = self._encode(embedding_text)
         record = MemoryRecord.from_event(
             event,
             embedding=embedding,
@@ -82,7 +105,7 @@ class VideoMemoryService:
         if top_k <= 0:
             raise ValueError("top_k 必须大于 0")
         processed_query = self._query_processor.process(query)
-        query_embedding = self._embedder.encode(processed_query)
+        query_embedding = self._encode(processed_query)
 
         results = [
             SearchResult(
@@ -100,3 +123,23 @@ class VideoMemoryService:
         """根据事件编号读取完整的视频记忆。"""
 
         return self._store.get(event_id)
+
+    def _encode(self, text: str) -> list[float]:
+        """校验任意 Embedding 实现的输出，避免错误向量进入检索流程。"""
+
+        try:
+            embedding = [float(value) for value in self._embedder.encode(text)]
+            expected_dimension = int(self._embedder.dimension)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("EmbeddingProvider 必须返回数值向量") from exc
+
+        if expected_dimension <= 0:
+            raise ValueError("EmbeddingProvider.dimension 必须大于 0")
+        if len(embedding) != expected_dimension:
+            raise ValueError(
+                "EmbeddingProvider 返回向量维度错误："
+                f"expected={expected_dimension}, actual={len(embedding)}"
+            )
+        if not all(math.isfinite(value) for value in embedding):
+            raise ValueError("EmbeddingProvider 返回向量必须全部为有限数值")
+        return embedding

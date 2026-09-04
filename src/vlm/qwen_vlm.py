@@ -22,6 +22,10 @@ B 模块职责：
     description
 """
 
+import os
+from pathlib import Path
+from typing import Optional
+
 from modelscope import snapshot_download
 from transformers import (
     Qwen2VLForConditionalGeneration,
@@ -46,7 +50,10 @@ MODEL_NAME = "Qwen/Qwen2-VL-2B-Instruct"
 # 模型加载
 # ============================================================
 
-def load_model(device_map: str = "auto"):
+def load_model(
+    device_map: str = "auto",
+    model_path: Optional[str] = None,
+):
     """
     加载 Qwen2-VL 模型和 Processor。
 
@@ -67,15 +74,24 @@ def load_model(device_map: str = "auto"):
             Qwen2-VL Processor
     """
 
-    print(
-        f"[模型] 正在通过 ModelScope 下载/定位：{MODEL_NAME}"
-    )
+    configured_path = model_path or os.getenv("QWEN_VL_MODEL_PATH")
 
     # --------------------------------------------------------
     # 1. 下载或定位模型
     # --------------------------------------------------------
 
-    model_dir = snapshot_download(MODEL_NAME)
+    if configured_path:
+        model_dir = Path(configured_path).expanduser().resolve()
+        if not model_dir.is_dir():
+            raise FileNotFoundError(
+                f"Qwen2-VL 本地模型目录不存在: {model_dir}"
+            )
+        print(f"[模型] 使用本地目录：{model_dir}")
+    else:
+        print(
+            f"[模型] 正在通过 ModelScope 下载/定位：{MODEL_NAME}"
+        )
+        model_dir = snapshot_download(MODEL_NAME)
 
     print(
         f"[模型本地路径] {model_dir}"

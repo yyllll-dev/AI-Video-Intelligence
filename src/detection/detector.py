@@ -107,6 +107,10 @@ class YoloDetector:
             ))
         return detections
 
+    def __call__(self, video_frame: VideoFrame) -> List[DetectionResult]:
+        """允许检测器直接作为 Pipeline 的逐帧回调使用。"""
+        return self.detect(video_frame)
+
 
 # ============ 统一创建入口 ============
 

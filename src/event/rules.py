@@ -34,8 +34,21 @@ END_STUDY_MIN_DURATION = 3.0
 # 学习行为
 # ============================================================
 
+# 以下细分类阈值保留给未来的二次稳定性过滤使用。
+# 当前 EventEngine 不再用它们阻止候选进入 VLM。
+
 # 阅读最短持续时间
 READING_MIN_DURATION = 3.0
+
+# 短暂漏检书本/手机时不立即切断当前行为，避免连续事件被拆成多段。
+ACTIVITY_GAP_TOLERANCE = 2.0
+
+# 坐到学习位置后，无论 YOLO 是否识别出书本、笔、手机等物体，
+# 都按固定窗口产生一个宽松候选交给 VLM 做最终语义分类。
+SEMANTIC_CANDIDATE_WINDOW_DURATION = 8.0
+
+# 视频结束或人物离开时，尾部候选窗口至少保留这么长。
+SEMANTIC_CANDIDATE_MIN_DURATION = 1.0
 
 # 书写最短持续时间
 WRITING_MIN_DURATION = 2.0

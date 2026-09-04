@@ -243,3 +243,7 @@ modelscope_cache/
 # Local logs
 *.log
 
+data/previews/
+data/replays/
+data/recordings/
+debug_logs/
