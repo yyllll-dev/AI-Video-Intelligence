@@ -5,11 +5,9 @@ from .event_types import (
     EVENT_LEAVE_STUDY_POSITION,
     EVENT_READING,
     EVENT_WRITING,
-    EVENT_PHONE_LEARNING,
-    EVENT_COMPUTER_LEARNING,
-    EVENT_OTHER_STUDY_BEHAVIOR,
-    EVENT_PHONE_DISTRACTION,
-    EVENT_COMPUTER_DISTRACTION,
+    EVENT_PHONE_USAGE,
+    EVENT_COMPUTER_USAGE,
+    EVENT_OTHER_BEHAVIOR,
     EVENT_COMMUNICATION_DISTRACTION,
 )
 from .rules import (
@@ -19,6 +17,9 @@ from .rules import (
     START_STUDY_MIN_DURATION,
     SEMANTIC_CANDIDATE_WINDOW_DURATION,
     SEMANTIC_CANDIDATE_MIN_DURATION,
+    VISIBLE_AWAY_MIN_DURATION,
+    UNKNOWN_POSITION_ENTRY_MIN_DURATION,
+    LEAVE_MIN_OBSERVATIONS,
 )
 
 
@@ -65,6 +66,11 @@ class EventEngine:
         self.person_track_id: Optional[int] = None
         # 最近一次看到人物的时间
         self.person_last_seen: Optional[float] = None
+        self.person_last_bbox: Optional[List[float]] = None
+        self.person_presence_start_time: Optional[float] = None
+        self.last_position_evidence: Optional[bool] = None
+        self.last_reset_reason: Optional[str] = None
+        self.leave_evidence_count = 0
 
         # --------------------------------------------------------
         # 学习位置状态
@@ -94,25 +100,43 @@ class EventEngine:
         #
         # reading
         # writing
-        # phone_learning
-        # computer_learning
-        # other_study_behavior
-        # phone_distraction
-        # computer_distraction
+        # phone_usage
+        # computer_usage
+        # other_behavior
         # communication_distraction
         # --------------------------------------------------------
         self.current_activity: Optional[str] = None
         self.activity_start_time: Optional[float] = None
-        self.activity_missing_since: Optional[float] = None
         self.semantic_window_duration = float(semantic_window_duration)
         if self.semantic_window_duration <= 0:
             raise ValueError("semantic_window_duration 必须大于 0")
-        self.activity_votes: Dict[str, int] = {}
+        # 一个检测帧可以同时给多个物体候选各投一票，避免 if/return 优先级。
+        self.activity_votes: Dict[str, float] = {}
+        self.activity_observation_count = 0
+        self.activity_unclassified_count = 0
 
-        # --------------------------------------------------------
-        # 学习结束整理
-        # --------------------------------------------------------
-        self.cleanup_start_time: Optional[float] = None
+    def debug_state(self) -> dict:
+        """返回状态机快照，供逐帧链路日志和故障定位使用。"""
+        return {
+            "state": self.state,
+            "person_track_id": self.person_track_id,
+            "person_last_seen": self.person_last_seen,
+            "person_last_bbox": self.person_last_bbox,
+            "person_presence_start_time": self.person_presence_start_time,
+            "last_position_evidence": self.last_position_evidence,
+            "last_reset_reason": self.last_reset_reason,
+            "leave_evidence_count": self.leave_evidence_count,
+            "sit_start_time": self.sit_start_time,
+            "leave_start_time": self.leave_start_time,
+            "preparation_start_time": self.preparation_start_time,
+            "study_start_time": self.study_start_time,
+            "study_started": self.study_started,
+            "current_activity": self.current_activity,
+            "activity_start_time": self.activity_start_time,
+            "activity_votes": dict(self.activity_votes),
+            "activity_observation_count": self.activity_observation_count,
+            "activity_unclassified_count": self.activity_unclassified_count,
+        }
 
     # ============================================================
     # 主入口
@@ -135,12 +159,10 @@ class EventEngine:
                 例如：
                     "reading"
                     "writing"
-                    "phone_learning"
-                    "phone_distraction"
-                    "computer_learning"
-                    "computer_distraction"
+                    "phone_usage"
+                    "computer_usage"
                     "communication_distraction"
-                    "other_study_behavior"
+                    "other_behavior"
                 当前没有 VLM 时可以为 None。
         返回：
             当前时刻新产生的 Event 列表。
@@ -180,6 +202,8 @@ class EventEngine:
         # 后续如果需要多人学习，可以再扩展。
         # --------------------------------------------------------
         person = self._select_person(persons)
+        if person is None:
+            return self._handle_person_absence(timestamp)
 
         # --------------------------------------------------------
         # 更新人物状态
@@ -203,17 +227,25 @@ class EventEngine:
             "ending",
         }:
             # 判断学习位置
-            at_study_position = self._is_at_study_position(
+            position_evidence = self._study_position_evidence(
                 person,
                 results,
             )
-            if not at_study_position:
+            self.last_position_evidence = position_evidence
+            # 只有“检测到了家具且人物明确远离”才是负证据。
+            # 家具漏检返回 None，继续当前会话，避免姿态/遮挡造成假离开。
+            if position_evidence is False:
                 events.extend(
-                    self._handle_leave_candidate(timestamp)
+                    self._handle_leave_candidate(
+                        timestamp,
+                        min_duration=VISIBLE_AWAY_MIN_DURATION,
+                        reason="学生持续远离学习位置",
+                    )
                 )
             else:
-                # 人物重新回到学习位置
+                # 正证据或证据未知，都取消可见人物的离开候选。
                 self.leave_start_time = None
+                self.leave_evidence_count = 0
                 # 学习准备 / 开始学习
                 events.extend(
                     self._handle_study_process(
@@ -243,10 +275,10 @@ class EventEngine:
     # ============================================================
     # 人物选择
     # ============================================================
-    @staticmethod
     def _select_person(
+        self,
         persons: List[TrackingResult],
-    ) -> TrackingResult:
+    ) -> Optional[TrackingResult]:
         """
         当前版本默认选择置信度最高的人物。
         后续多人场景可以改成：
@@ -254,6 +286,22 @@ class EventEngine:
             - 区域过滤
             - 多人独立状态机
         """
+        if self.person_track_id is not None:
+            current = next(
+                (person for person in persons if person.track_id == self.person_track_id),
+                None,
+            )
+            if current is not None:
+                return current
+            # ID 改变时只允许绑定到上一位置附近的人，避免多人场景串人。
+            if self.state != "outside" and self.person_last_bbox is not None:
+                nearby = [
+                    person for person in persons
+                    if self._same_person_area(self.person_last_bbox, person.bbox)
+                ]
+                if not nearby:
+                    return None
+                return max(nearby, key=lambda person: person.confidence)
         return max(
             persons,
             key=lambda person: person.confidence,
@@ -277,12 +325,12 @@ class EventEngine:
         if self.person_track_id is None:
             self.person_track_id = track_id
             self.person_last_seen = timestamp
+            self.person_last_bbox = list(person.bbox)
+            self.person_presence_start_time = timestamp
             # 注意：
             # 第一次看到人不能直接认为“坐到学习位置”。
             # 必须通过家具空间关系判断。
-            if self._is_at_study_position(person, results):
-                self.sit_start_time = timestamp
-                self.state = "sitting"
+            self._maybe_start_sitting(person, results, timestamp)
             return events
 
         # --------------------------------------------------------
@@ -290,13 +338,9 @@ class EventEngine:
         # --------------------------------------------------------
         if track_id == self.person_track_id:
             self.person_last_seen = timestamp
-            if (
-                self.state == "outside"
-                and self._is_at_study_position(person, results)
-            ):
-                self.sit_start_time = timestamp
-                self.leave_start_time = None
-                self.state = "sitting"
+            self.person_last_bbox = list(person.bbox)
+            if self.state == "outside":
+                self._maybe_start_sitting(person, results, timestamp)
             return events
 
         # --------------------------------------------------------
@@ -306,12 +350,50 @@ class EventEngine:
         # 当前版本重新绑定人物。
         # --------------------------------------------------------
         self.person_last_seen = timestamp
+        self.person_last_bbox = list(person.bbox)
+        # Tracker 短暂丢失后可能给同一人物分配新 ID。既然当前帧已选中
+        # 新人物，就必须同步重绑，否则后续 Event 会一直携带过期 track_id。
+        self.person_track_id = track_id
         if self.state == "outside":
-            self.person_track_id = track_id
-            if self._is_at_study_position(person, results):
-                self.sit_start_time = timestamp
-                self.state = "sitting"
+            self.person_presence_start_time = timestamp
+            self._maybe_start_sitting(person, results, timestamp)
         return events
+
+    def _maybe_start_sitting(
+        self,
+        person: TrackingResult,
+        results: List[TrackingResult],
+        timestamp: float,
+    ) -> None:
+        evidence = self._study_position_evidence(person, results)
+        self.last_position_evidence = evidence
+        if self.person_presence_start_time is None:
+            self.person_presence_start_time = timestamp
+        if evidence is True:
+            self.sit_start_time = timestamp
+            self.leave_start_time = None
+            self.leave_evidence_count = 0
+            self.state = "sitting"
+        elif evidence is False:
+            # 明确远离桌椅，不累计“稳定在学习区域”的兜底时间。
+            self.person_presence_start_time = timestamp
+        elif timestamp - self.person_presence_start_time >= UNKNOWN_POSITION_ENTRY_MIN_DURATION:
+            self.sit_start_time = self.person_presence_start_time
+            self.leave_start_time = None
+            self.leave_evidence_count = 0
+            self.state = "sitting"
+
+    @staticmethod
+    def _same_person_area(previous_bbox: List[float], current_bbox: List[float]) -> bool:
+        if len(previous_bbox) != 4 or len(current_bbox) != 4:
+            return False
+        px = (previous_bbox[0] + previous_bbox[2]) / 2.0
+        py = (previous_bbox[1] + previous_bbox[3]) / 2.0
+        cx = (current_bbox[0] + current_bbox[2]) / 2.0
+        cy = (current_bbox[1] + current_bbox[3]) / 2.0
+        width = max(previous_bbox[2] - previous_bbox[0], 1.0)
+        height = max(previous_bbox[3] - previous_bbox[1], 1.0)
+        return abs(cx - px) / width <= 1.5 and abs(cy - py) / height <= 1.5
 
     # ============================================================
     # 学习位置判断
@@ -339,6 +421,14 @@ class EventEngine:
         当前这里只做基础空间判断，
         不依赖固定的像素坐标。
         """
+        return self._study_position_evidence(person, results) is True
+
+    def _study_position_evidence(
+        self,
+        person: TrackingResult,
+        results: List[TrackingResult],
+    ) -> Optional[bool]:
+        """返回 True/False/None：在位置/明确远离/家具证据缺失。"""
         furniture = [
             result
             for result in results
@@ -351,7 +441,7 @@ class EventEngine:
             }
         ]
         if not furniture:
-            return False
+            return None
 
         person_center = self._bbox_center(person.bbox)
 
@@ -516,29 +606,24 @@ class EventEngine:
         self,
         results: List[TrackingResult],
         activity_hint: Optional[str] = None,
-    ) -> Optional[str]:
+    ) -> Dict[str, float]:
         """
-        确定当前行为。
-        优先级：
-            1. Qwen‑VL / 上层模块提供的 activity_hint
-            2. YOLO 基础目标规则
-        这样以后接入 Qwen‑VL 时，
-        不需要修改 EventEngine 的整体结构。
+        收集当前帧的全部平等行为候选。这里仅表达“相关物体出现”，
+        不把物体存在直接当成最终动作。
         """
         # --------------------------------------------------------
         # VLM 已经判断
         # --------------------------------------------------------
-        if activity_hint in {
+        normalized_hint = activity_hint
+        if normalized_hint in {
             EVENT_READING,
             EVENT_WRITING,
-            EVENT_PHONE_LEARNING,
-            EVENT_COMPUTER_LEARNING,
-            EVENT_OTHER_STUDY_BEHAVIOR,
-            EVENT_PHONE_DISTRACTION,
-            EVENT_COMPUTER_DISTRACTION,
+            EVENT_PHONE_USAGE,
+            EVENT_COMPUTER_USAGE,
+            EVENT_OTHER_BEHAVIOR,
             EVENT_COMMUNICATION_DISTRACTION,
         }:
-            return activity_hint
+            return {normalized_hint: 1.0}
 
         # --------------------------------------------------------
         # 暂时没有 VLM
@@ -553,28 +638,26 @@ class EventEngine:
     @staticmethod
     def _basic_activity_from_objects(
         results: List[TrackingResult],
-    ) -> Optional[str]:
+    ) -> Dict[str, float]:
         """
-        根据 YOLO 当前能看到的物体，
-        给出一个“基础行为候选”。
+        根据 YOLO 当前能看到的物体，返回全部基础行为候选。
         注意：
             这里不是最终的行为理解。
         例如：
-            book → reading 候选
-            cell phone → 无法判断是学习还是分心
-            laptop → 无法判断是学习还是分心
-        手机和电脑只作为候选提示，最终类型由 Qwen‑VL 纠正。
+            book → reading 的弱候选证据
+            cell phone → phone_usage 的弱候选证据
+            laptop → computer_usage 的弱候选证据
+        所有出现的相关物体各贡献一次，不设置类别优先级。最终动作由 VLM
+        和跨窗口时序层判断。
         """
         class_names = {
             result.class_name
             for result in results
         }
 
-        # --------------------------------------------------------
-        # 书本
-        # --------------------------------------------------------
+        candidates: Dict[str, float] = {}
         if "book" in class_names:
-            return EVENT_READING
+            candidates[EVENT_READING] = 1.0
 
         # --------------------------------------------------------
         # 笔
@@ -583,55 +666,69 @@ class EventEngine:
         # 如果以后自训练模型增加 pen，可以直接使用。
         # --------------------------------------------------------
         if "pen" in class_names:
-            return EVENT_WRITING
+            candidates[EVENT_WRITING] = 1.0
 
         # --------------------------------------------------------
         # 手机
         #
-        # 不直接判断为 phone_learning 或 distraction。
-        # 必须交给 VLM。
+        # 只表示手机出现在画面里，不区分学习或分心。
         # --------------------------------------------------------
         if (
             "cell phone" in class_names
             or "phone" in class_names
             or "mobile phone" in class_names
         ):
-            return EVENT_PHONE_DISTRACTION
+            candidates[EVENT_PHONE_USAGE] = 1.0
 
         # --------------------------------------------------------
         # 电脑
         #
-        # 同样需要 VLM 判断是在学习还是分心。
+        # 只表示电脑出现在画面里。
         # --------------------------------------------------------
         if (
             "laptop" in class_names
             or "computer" in class_names
+            or "keyboard" in class_names
+            or "mouse" in class_names
         ):
-            return EVENT_COMPUTER_LEARNING
+            candidates[EVENT_COMPUTER_USAGE] = 1.0
 
-        # --------------------------------------------------------
-        # 没有明确目标
-        # --------------------------------------------------------
-        return EVENT_OTHER_STUDY_BEHAVIOR
+        return candidates
 
     # ============================================================
     # 学习行为状态处理
     # ============================================================
     def _handle_activity(
         self,
-        activity: Optional[str],
+        activity: Dict[str, float],
         person: TrackingResult,
         timestamp: float,
     ) -> List[Event]:
         events: List[Event] = []
 
-        candidate = activity or EVENT_OTHER_STUDY_BEHAVIOR
+        # 空候选只表示本帧没有具体物体证据，不能给“其他”投票。
+        candidates = activity or {}
         if self.activity_start_time is None:
             self.activity_start_time = timestamp
-        self.current_activity = candidate
-        self.activity_missing_since = None
+        self.activity_observation_count += 1
+        if not candidates:
+            self.activity_unclassified_count += 1
+        # current_activity 只供关键帧采集命名；并列时使用中性 other，真正的
+        # 多候选证据完整保存在 activity_votes 中。
+        top_score = max(candidates.values(), default=0.0)
+        top_candidates = [
+            name for name, score in candidates.items() if score == top_score
+        ]
+        self.current_activity = (
+            top_candidates[0]
+            if len(top_candidates) == 1
+            else EVENT_OTHER_BEHAVIOR
+        )
 
-        self.activity_votes[candidate] = self.activity_votes.get(candidate, 0) + 1
+        for candidate, score in candidates.items():
+            self.activity_votes[candidate] = (
+                self.activity_votes.get(candidate, 0.0) + max(0.0, float(score))
+            )
         if timestamp - self.activity_start_time < self.semantic_window_duration:
             return events
 
@@ -652,10 +749,26 @@ class EventEngine:
         if duration < SEMANTIC_CANDIDATE_MIN_DURATION:
             return None
 
-        event_type = max(
-            self.activity_votes,
-            key=self.activity_votes.get,
-            default=EVENT_OTHER_STUDY_BEHAVIOR,
+        # 用全部分析帧作为分母，避免少量偶发物体被“只在有效票之间归一化”
+        # 后伪装成接近 100% 的强证据。例如 30 帧中仅 2 帧出现 laptop，
+        # 现在显示约 6.7%，而不是 computer_usage=1.0。
+        observation_total = self.activity_observation_count
+        candidate_scores = {
+            name: round(score / observation_total, 4)
+            for name, score in self.activity_votes.items()
+        } if observation_total > 0 else {}
+        top_score = max(candidate_scores.values(), default=0.0)
+        top_candidates = [
+            name for name, score in candidate_scores.items()
+            if abs(score - top_score) < 1e-9
+        ]
+        # other_behavior 在这里是“等待 VLM 分类”的入口，不是参与投票后
+        # 获胜的类别。真正的其他事件只能由后续兜底产生。
+        event_type = top_candidates[0] if len(top_candidates) == 1 else EVENT_OTHER_BEHAVIOR
+        unclassified_ratio = (
+            self.activity_unclassified_count / self.activity_observation_count
+            if self.activity_observation_count > 0
+            else 1.0
         )
         event = Event(
             event_type=event_type,
@@ -664,11 +777,14 @@ class EventEngine:
             track_id=self.person_track_id,
             confidence=person.confidence if person is not None else 1.0,
             description="待 VLM 识别的学习行为候选",
+            candidate_scores=candidate_scores,
+            unclassified_ratio=round(unclassified_ratio, 4),
         )
         self.activity_start_time = end_time
         self.current_activity = None
-        self.activity_missing_since = None
         self.activity_votes = {}
+        self.activity_observation_count = 0
+        self.activity_unclassified_count = 0
         return event
 
     # ============================================================
@@ -677,6 +793,9 @@ class EventEngine:
     def _handle_leave_candidate(
         self,
         timestamp: float,
+        *,
+        min_duration: float = LEAVE_STUDY_POSITION_MIN_DURATION,
+        reason: str = "学生离开学习位置",
     ) -> List[Event]:
         events: List[Event] = []
 
@@ -685,7 +804,9 @@ class EventEngine:
         # --------------------------------------------------------
         if self.leave_start_time is None:
             self.leave_start_time = timestamp
-            return events
+            self.leave_evidence_count = 1
+        else:
+            self.leave_evidence_count += 1
 
         leave_duration = timestamp - self.leave_start_time
 
@@ -693,7 +814,8 @@ class EventEngine:
         # 持续离开达到阈值
         # --------------------------------------------------------
         if (
-            leave_duration >= LEAVE_STUDY_POSITION_MIN_DURATION
+            leave_duration >= min_duration
+            and self.leave_evidence_count >= LEAVE_MIN_OBSERVATIONS
             and self.state != "outside"
         ):
             # ----------------------------------------------------
@@ -713,12 +835,12 @@ class EventEngine:
                     end_time=timestamp,
                     track_id=self.person_track_id,
                     confidence=1.0,
-                    description="学生离开学习位置",
+                    description=reason,
                 )
             )
 
             self.state = "outside"
-            self._reset_learning_state(keep_person=True)
+            self._reset_learning_state(keep_person=True, reason=reason)
 
         return events
 
@@ -734,6 +856,10 @@ class EventEngine:
             return events
         if self.person_last_seen is None:
             return events
+        if self.state == "outside":
+            self.person_presence_start_time = None
+            self.leave_evidence_count = 0
+            return events
 
         # --------------------------------------------------------
         # 注意：
@@ -744,10 +870,14 @@ class EventEngine:
         # --------------------------------------------------------
         if self.leave_start_time is None:
             self.leave_start_time = self.person_last_seen
+            self.leave_evidence_count = 1
+        else:
+            self.leave_evidence_count += 1
 
         absence_duration = timestamp - self.leave_start_time
         if (
             absence_duration >= LEAVE_STUDY_POSITION_MIN_DURATION
+            and self.leave_evidence_count >= LEAVE_MIN_OBSERVATIONS
         ):
             if self.state != "outside":
                 activity_event = self._finish_activity_window(self.leave_start_time)
@@ -766,7 +896,7 @@ class EventEngine:
                 )
 
                 self.state = "outside"
-                self._reset_learning_state(keep_person=True)
+                self._reset_learning_state(keep_person=True, reason="person_absent")
 
         return events
 
@@ -776,20 +906,25 @@ class EventEngine:
     def _reset_learning_state(
         self,
         keep_person: bool = True,
+        reason: str = "manual_reset",
     ) -> None:
+        self.last_reset_reason = reason
         if not keep_person:
             self.person_track_id = None
             self.person_last_seen = None
+            self.person_last_bbox = None
         self.sit_start_time = None
         self.leave_start_time = None
+        self.leave_evidence_count = 0
         self.preparation_start_time = None
         self.study_start_time = None
         self.study_started = False
         self.current_activity = None
         self.activity_start_time = None
-        self.activity_missing_since = None
         self.activity_votes = {}
-        self.cleanup_start_time = None
+        self.activity_observation_count = 0
+        self.activity_unclassified_count = 0
+        self.person_presence_start_time = None
 
     # ============================================================
     # Event 创建
@@ -819,11 +954,18 @@ class EventEngine:
         """在视频结束或实时分析停止时，以最后一帧时间关闭活动。"""
         events: List[Event] = []
         timestamp = float(timestamp)
-        activity_event = self._finish_activity_window(timestamp)
+        # 若结束时正在等待“人物缺失”确认，动作只能截止到最后可见时刻，
+        # 不能把没有人物证据的尾部区间算进上一动作。
+        activity_end = (
+            min(timestamp, self.leave_start_time)
+            if self.leave_start_time is not None
+            else timestamp
+        )
+        activity_event = self._finish_activity_window(activity_end)
         if activity_event is not None:
             events.append(activity_event)
 
-        self._reset_learning_state(keep_person=False)
+        self._reset_learning_state(keep_person=False, reason="finalize")
         self.state = "outside"
         return events
 
@@ -837,11 +979,9 @@ class EventEngine:
         descriptions = {
             EVENT_READING: "学生正在阅读",
             EVENT_WRITING: "学生正在书写",
-            EVENT_PHONE_LEARNING: "学生正在使用手机学习",
-            EVENT_COMPUTER_LEARNING: "学生正在使用电脑学习",
-            EVENT_OTHER_STUDY_BEHAVIOR: "学生正在进行其他学习行为",
-            EVENT_PHONE_DISTRACTION: "学生正在使用手机分心",
-            EVENT_COMPUTER_DISTRACTION: "学生正在使用电脑分心",
+            EVENT_PHONE_USAGE: "学生正在使用手机",
+            EVENT_COMPUTER_USAGE: "学生正在使用电脑",
+            EVENT_OTHER_BEHAVIOR: "无法判断人物正在进行的具体行为",
             EVENT_COMMUNICATION_DISTRACTION: "学生正在进行交流分心",
         }
         return descriptions.get(

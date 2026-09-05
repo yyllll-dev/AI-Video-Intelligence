@@ -1,5 +1,5 @@
-from dataclasses import dataclass
-from typing import List
+from dataclasses import dataclass, field
+from typing import Dict, List
 
 
 @dataclass
@@ -24,3 +24,8 @@ class Event:
     track_id: int | None
     confidence: float
     description: str = ""
+    # 当前窗口内全部平等候选在“所有分析帧”中的出现比例。旧调用方无需提供。
+    # 该字段只是物体线索，不代表人物已经执行了对应事件。
+    candidate_scores: Dict[str, float] = field(default_factory=dict)
+    # 没有提供具体物体候选的分析帧比例，仅用于诊断，不是“其他”的票数。
+    unclassified_ratio: float = 0.0

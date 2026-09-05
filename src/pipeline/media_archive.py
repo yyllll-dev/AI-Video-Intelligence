@@ -409,17 +409,23 @@ class LiveEvidenceCollector:
         self._save(key, frame, timestamp)
 
     def finish(self, event_type: str, start_time: float, frame: np.ndarray, timestamp: float) -> list[str]:
-        key = min(
-            (key for key in self._events if key[0] == event_type),
-            key=lambda item: abs(item[1] - start_time),
-            default=None,
-        )
-        if key is None:
+        # 同一窗口内候选类型可能多次变化；候选只是弱提示，证据应按窗口
+        # 合并，并一次性清理，不能只弹出最终胜出类型而留下陈旧键。
+        keys = [
+            key for key in self._events
+            if abs(key[1] - float(start_time)) <= 1e-6
+        ]
+        if not keys:
             return []
+        key = next((item for item in keys if item[0] == event_type), keys[0])
         entries = self._events[key]
         if not entries or timestamp - entries[-1][0] > 1.0:
             self._save(key, frame, timestamp)
-        return [path for _, path in self._events.pop(key, [])]
+        combined = []
+        for candidate_key in keys:
+            combined.extend(self._events.pop(candidate_key, []))
+        combined.sort(key=lambda item: item[0])
+        return list(dict.fromkeys(path for _, path in combined))
 
     def _save(self, key: tuple[str, float], frame: np.ndarray, timestamp: float) -> None:
         event_dir = self.output_dir / f"live_{key[0]}_{key[1]:.3f}".replace(".", "_")

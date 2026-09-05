@@ -11,7 +11,7 @@ def parse_source(value: str) -> int | str:
 def main():
     parser = argparse.ArgumentParser(description="AI Video Intelligence 端到端运行器")
     parser.add_argument("--source", required=True, help="视频路径，或摄像头编号 0")
-    parser.add_argument("--qwen-model-path", help="本地 Qwen2-VL 模型目录")
+    parser.add_argument("--qwen-model-path", help="本地 Qwen2/Qwen2.5-VL 模型目录")
     parser.add_argument("--yolo-device", default="cpu", help="cpu、0 或 cuda:0")
     parser.add_argument("--yolo-confidence", type=float, default=0.5)
     parser.add_argument("--analysis-fps", type=float, default=2.0)
@@ -23,9 +23,14 @@ def main():
     parser.add_argument("--max-duration", type=float, help="摄像头最多运行秒数")
     parser.add_argument("--query", default="刚才发生了什么？")
     parser.add_argument(
+        "--trace",
+        action="store_true",
+        help="逐帧打印 YOLO、Tracker、Event、VLM 和 Memory 的完整输入输出",
+    )
+    parser.add_argument(
         "--no-vlm",
         action="store_true",
-        help="只调试前半链路，不加载 Qwen2-VL",
+        help="只调试前半链路，不加载 Qwen-VL 及其依赖",
     )
     args = parser.parse_args()
 
@@ -41,6 +46,7 @@ def main():
         buffer_duration=args.buffer_duration,
         recording_segment_seconds=args.recording_segment_seconds,
         replay_max_seconds=args.replay_max_seconds,
+        trace=args.trace,
         clips_dir=project_root / "data" / "clips",
         recordings_dir=project_root / "data" / "recordings",
         replays_dir=project_root / "data" / "replays",

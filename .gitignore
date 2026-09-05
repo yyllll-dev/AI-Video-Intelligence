@@ -234,6 +234,20 @@ data/raw/*
 data/screenshots/
 data/clips/
 
+# Generated videos and extracted frames anywhere under data/. Keep source code
+# and explicit placeholder files, but never upload local test media to GitHub.
+/data/**/*.mp4
+/data/**/*.avi
+/data/**/*.mov
+/data/**/*.mkv
+/data/**/*.webm
+/data/**/*.m4v
+/data/**/*.jpg
+/data/**/*.jpeg
+/data/**/*.png
+/data/**/*.bmp
+/data/**/*.webp
+
 # Model caches
 .cache/
 .huggingface/
@@ -242,6 +256,7 @@ modelscope_cache/
 
 # Local logs
 *.log
+/result*.txt
 
 data/previews/
 data/replays/

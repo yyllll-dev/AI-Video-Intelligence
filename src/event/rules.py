@@ -13,7 +13,18 @@
 SIT_AT_STUDY_POSITION_MIN_DURATION = 2.0
 
 # 人物离开学习位置后，持续达到该时间才认为真正离开
-LEAVE_STUDY_POSITION_MIN_DURATION = 2.0
+# 人物完全未检出时的离开迟滞。短暂遮挡不应切断学习会话。
+LEAVE_STUDY_POSITION_MIN_DURATION = 3.0
+
+# 人物仍可见、且检测到的桌椅明确与人物分离时，使用更长迟滞。
+# “桌椅没有检出”属于未知证据，不进入该计时。
+VISIBLE_AWAY_MIN_DURATION = 6.0
+
+# 视频开头始终识别不到桌椅时，以人物在同一区域稳定出现作为入座兜底。
+UNKNOWN_POSITION_ENTRY_MIN_DURATION = 4.0
+
+# 离开必须同时满足持续时间和连续负证据次数，避免队列跳帧后一次漏检就确认。
+LEAVE_MIN_OBSERVATIONS = 3
 
 
 # ============================================================
@@ -26,22 +37,9 @@ STUDY_PREPARATION_MIN_DURATION = 1.0
 # 判定正式开始学习所需的最短持续时间
 START_STUDY_MIN_DURATION = 3.0
 
-# 判定结束学习所需的持续时间
-END_STUDY_MIN_DURATION = 3.0
-
-
 # ============================================================
 # 学习行为
 # ============================================================
-
-# 以下细分类阈值保留给未来的二次稳定性过滤使用。
-# 当前 EventEngine 不再用它们阻止候选进入 VLM。
-
-# 阅读最短持续时间
-READING_MIN_DURATION = 3.0
-
-# 短暂漏检书本/手机时不立即切断当前行为，避免连续事件被拆成多段。
-ACTIVITY_GAP_TOLERANCE = 2.0
 
 # 坐到学习位置后，无论 YOLO 是否识别出书本、笔、手机等物体，
 # 都按固定窗口产生一个宽松候选交给 VLM 做最终语义分类。
@@ -49,37 +47,3 @@ SEMANTIC_CANDIDATE_WINDOW_DURATION = 8.0
 
 # 视频结束或人物离开时，尾部候选窗口至少保留这么长。
 SEMANTIC_CANDIDATE_MIN_DURATION = 1.0
-
-# 书写最短持续时间
-WRITING_MIN_DURATION = 2.0
-
-# 手机学习最短持续时间
-PHONE_LEARNING_MIN_DURATION = 3.0
-
-# 电脑学习最短持续时间
-COMPUTER_LEARNING_MIN_DURATION = 3.0
-
-# 其他学习行为最短持续时间
-OTHER_STUDY_BEHAVIOR_MIN_DURATION = 3.0
-
-
-# ============================================================
-# 分心行为
-# ============================================================
-
-# 手机分心最短持续时间
-PHONE_DISTRACTION_MIN_DURATION = 2.0
-
-# 电脑分心最短持续时间
-COMPUTER_DISTRACTION_MIN_DURATION = 3.0
-
-# 交流分心最短持续时间
-COMMUNICATION_DISTRACTION_MIN_DURATION = 3.0
-
-
-# ============================================================
-# 学习结束整理
-# ============================================================
-
-# 学习结束整理最短持续时间
-STUDY_END_CLEANUP_MIN_DURATION = 2.0

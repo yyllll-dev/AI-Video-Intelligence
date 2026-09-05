@@ -48,18 +48,16 @@ B模块职责：
 """
 
 import argparse
+from difflib import SequenceMatcher
 import json
 import re
 import time
 from pathlib import Path
 from typing import Any
 
-from qwen_vl_utils import process_vision_info
-
 from .qwen_vlm import load_model
 from .prompt import (
     build_activity_prompt,
-    CLASSIFY_PROMPT,
     EVENT_TYPES,
     EVENT_TYPE_CN,
 )
@@ -125,6 +123,12 @@ def run_vlm(
         不负责解析JSON，
         不负责修改Event。
     """
+    try:
+        from qwen_vl_utils import process_vision_info
+    except ImportError as exc:
+        raise RuntimeError(
+            "缺少 qwen-vl-utils；只有启用 Qwen-VL 推理时才需要安装"
+        ) from exc
 
     if not image_paths:
         raise ValueError(
@@ -216,8 +220,11 @@ def run_vlm(
     # ========================================================
 
     generate_kwargs: dict[str, Any] = {
-        "max_new_tokens": 256,
+        # 8 个布尔值加少量分段在 512 token 内足够。限制输出长度并增加
+        # 重复惩罚，避免 2B 模型循环复读否定句直到 JSON 被截断。
+        "max_new_tokens": 512,
         "do_sample": do_sample,
+        "repetition_penalty": 1.10,
     }
 
     if not do_sample:
@@ -260,6 +267,72 @@ def run_vlm(
 # JSON解析
 # ============================================================
 
+def _compact_description(text: str, max_chars: int = 120) -> str:
+    """压缩模型描述：去重退化句、移除已知模板复读并限制长度。"""
+    sentences = re.split(r"(?<=[。！？!?])", text)
+    unique_sentences: list[str] = []
+    seen: set[str] = set()
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if (
+            not sentence
+            or sentence in seen
+            or "没有在学习结束" in sentence
+            or "没有在学习准备" in sentence
+        ):
+            continue
+        seen.add(sentence)
+        unique_sentences.append(sentence)
+        if len("".join(unique_sentences)) >= max_chars:
+            break
+    compact = "".join(unique_sentences).strip()
+    if len(compact) > max_chars:
+        compact = compact[:max_chars].rstrip("，,；; ") + "。"
+    return compact
+
+
+def _salvage_string_field(
+    raw_text: str,
+    field_name: str,
+    max_chars: int = 120,
+) -> str:
+    """从未闭合的 Qwen JSON 中抢救一个字符串字段。"""
+    match = re.search(rf'"{re.escape(field_name)}"\s*:\s*"', raw_text)
+    if match is None:
+        return ""
+
+    tail = raw_text[match.end():]
+    characters: list[str] = []
+    escaped = False
+    for character in tail:
+        if escaped:
+            characters.append(character)
+            escaped = False
+            continue
+        if character == "\\":
+            escaped = True
+            continue
+        if character == '"':
+            break
+        characters.append(character)
+
+    text = "".join(characters).replace("\\n", " ").strip()
+    return _compact_description(text, max_chars)
+
+
+def _salvage_description(raw_text: str, max_chars: int = 120) -> str:
+    """兼容新旧协议，从未闭合 JSON 中优先抢救客观描述。"""
+    for field_name in (
+        "objective_description",
+        "final_description",
+        "description",
+    ):
+        description = _salvage_string_field(raw_text, field_name, max_chars)
+        if description:
+            return description
+    return "[VLM未返回有效description]"
+
+
 def parse_json(raw_text: str) -> dict[str, Any]:
     """
     解析Qwen-VL输出的JSON。
@@ -269,6 +342,8 @@ def parse_json(raw_text: str) -> dict[str, Any]:
 
     返回字段至少保证：
         event_confirmed
+        objective_description
+        final_description
         description
         is_phone_usage
         is_studying
@@ -277,53 +352,169 @@ def parse_json(raw_text: str) -> dict[str, Any]:
     raw_text = raw_text.strip()
 
     # --------------------------------------------------------
-    # 情况1：标准JSON
+    # 情况1：标准 JSON（先去掉 markdown 代码块包裹）
     # --------------------------------------------------------
+    stripped = raw_text.strip()
+    # 去掉 ```json ... ``` 包裹
+    if stripped.startswith("```"):
+        lines = stripped.split("\n")
+        clean_lines = [
+            line for line in lines
+            if not line.strip().startswith("```")
+        ]
+        stripped = "\n".join(clean_lines).strip()
 
     try:
-        result = json.loads(raw_text)
-
+        result = json.loads(stripped)
         if isinstance(result, dict):
             return result
-
     except json.JSONDecodeError:
         pass
 
-    # --------------------------------------------------------
-    # 情况2：JSON前后存在额外文字
-    # --------------------------------------------------------
-
-    match = re.search(
-        r"\{.*\}",
-        raw_text,
-        re.DOTALL,
-    )
-
-    if match:
-
+    # Qwen2-VL-2B 偶尔会输出完整字段，却漏掉最外层对象括号，例如直接从
+    # "description": ... 开始。必须先修复整个顶层片段；否则下面的括号
+    # 提取会误把 activity_segments 中的第一个小对象当成完整回答。
+    repaired = _repair_missing_outer_object(stripped)
+    if repaired is not None:
         try:
-            result = json.loads(
-                match.group()
-            )
-
+            result = json.loads(repaired)
             if isinstance(result, dict):
                 return result
-
         except json.JSONDecodeError:
             pass
 
     # --------------------------------------------------------
-    # 情况3：解析失败
+    # 情况2：提取第一个括号配平的 JSON 对象。不能使用非贪婪正则，
+    # 因为当前协议包含嵌套的 events 对象，会在内层右括号处被截断。
+    # --------------------------------------------------------
+    candidate = _extract_first_json_object(stripped)
+    if candidate:
+        try:
+            result = json.loads(candidate)
+            if isinstance(result, dict):
+                return result
+        except json.JSONDecodeError:
+            pass
+
+    # --------------------------------------------------------
+    # 情况3：多行 JSON（逐行拼合）
+    # --------------------------------------------------------
+    lines = stripped.split("\n")
+    candidates = []
+    for line in lines:
+        line = line.strip()
+        if not line or line == '"' or line.count('"') < 3:
+            continue
+        candidates.append(line)
+
+    for candidate in candidates[:3]:
+        try:
+            result = json.loads(candidate)
+            if isinstance(result, dict):
+                return result
+        except json.JSONDecodeError:
+            continue
+
+    combined = " ".join(candidates[:5])
+    if combined.strip():
+        try:
+            result = json.loads(combined)
+            if isinstance(result, dict):
+                return result
+        except json.JSONDecodeError:
+            pass
+
+    # --------------------------------------------------------
+    # 情况4：解析失败
     # --------------------------------------------------------
 
+    salvaged_objective = _salvage_description(raw_text)
+    salvaged_final = _salvage_string_field(raw_text, "final_description")
     return {
         "event_confirmed": False,
-        "description": (
-            f"[VLM JSON解析失败] {raw_text}"
-        ),
+        "objective_description": salvaged_objective,
+        "final_description": salvaged_final,
+        "description": salvaged_final or salvaged_objective,
         "is_phone_usage": False,
         "is_studying": False,
+        "_parse_error": "VLM 输出不是闭合的合法 JSON",
     }
+
+
+def _extract_first_json_object(text: str) -> str | None:
+    """提取首个完整 JSON 对象，正确处理嵌套对象及字符串中的括号。"""
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1]
+    return None
+
+
+def _repair_missing_outer_object(text: str) -> str | None:
+    """修复模型漏写最外层 `{`、`}` 的顶层 JSON 字段片段。"""
+    first_quote = text.find('"')
+    if first_quote < 0:
+        return None
+    fragment = text[first_quote:].strip()
+    fragment = re.sub(r"(?:\r?\n)?\s*[-`]+\s*$", "", fragment).strip()
+    if not fragment.startswith('"'):
+        return None
+    has_description_field = any(
+        f'"{field_name}"' in fragment
+        for field_name in (
+            "objective_description",
+            "final_description",
+            "description",
+        )
+    )
+    if not has_description_field or '"events"' not in fragment:
+        return None
+
+    balance = 0
+    in_string = False
+    escaped = False
+    for char in fragment:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            balance += 1
+        elif char == "}":
+            balance -= 1
+
+    # 前面补一个顶层左括号。balance=-1 表示模型保留了顶层右括号；
+    # balance=0 表示顶层左右括号都漏掉了，需要再补一个右括号。
+    missing_closing = balance + 1
+    if missing_closing < 0:
+        return None
+    return "{" + fragment + ("}" * missing_closing)
 
 
 # ============================================================
@@ -339,7 +530,7 @@ def parse_json_multi_event(raw_text: str) -> dict[str, Any]:
         "description": "...",
         "events": {
             "sit_at_study_position": true/false,
-            ... 14个事件
+            ... 8个事件
         },
         "is_phone_usage": true/false,
         "is_studying": true/false
@@ -419,63 +610,119 @@ EVENT_CONTENT_KEYWORDS: dict[str, list[str]] = {
         "坐下", "坐在", "坐着", "入座", "落座", "到桌前", "走到", "移到", "靠近"
     ],
     "leave_study_position": ["离开", "起身", "站起来", "站起", "走开", "走离"],
-    "study_preparation": ["整理", "摆放", "准备", "拿取", "拿出", "摊开", "布置"],
-    "start_study": ["开始", "翻开", "打开", "提笔", "动笔", "拿起"],
-    "end_study": ["合上", "收起", "收拾", "停止", "放下"],
     "reading": [
-        "看书", "读书", "看资料", "翻页", "阅读", "看教材", "看书本",
-        "拿书", "拿着书", "手里拿着书",
+        "持续看书", "专注看书", "看书", "读书", "看资料", "阅读",
+        "看教材", "阅读书籍", "阅读资料", "注视书页", "浏览文字",
     ],
     "writing": ["写字", "记笔记", "做笔记", "做题", "画图", "书写", "写笔记"],
-    "phone_learning": ["手机学习", "手机看", "手机查", "手机背"],
-    "computer_learning": ["电脑学习", "电脑看", "电脑查"],
-    "other_study_behavior": ["学习"],
-    "phone_distraction": [
-        "刷手机", "玩手机", "手机聊天", "手机游戏", "手机刷",
-        "拿起手机", "使用手机", "查看手机", "看手机", "手机内容",
+    "phone_usage": [
+        "使用手机", "操作手机", "看手机", "查看手机", "注视手机",
+        "滑动手机", "点击手机",
     ],
-    "computer_distraction": ["打游戏", "玩电脑", "电脑游戏", "电脑刷"],
+    "computer_usage": [
+        "使用电脑", "使用笔记本电脑", "使用笔记本", "操作电脑", "操作笔记本电脑",
+        "看着电脑屏幕", "注视电脑屏幕", "操作键盘", "操作鼠标",
+        "看电脑", "点击电脑", "敲键盘", "使用键盘", "使用鼠标",
+    ],
     "communication_distraction": ["说话", "通话", "讨论"],
-    "study_end_cleanup": ["收拾", "整理", "收", "归位"],
+    "other_behavior": [
+        "整理", "收拾", "摆放", "归位", "拿出书", "取出书", "收起书",
+        "收好书", "打开书", "翻到", "寻找页码", "拿出笔袋", "打开笔袋",
+        "收起笔袋", "拿出电脑", "打开电脑", "合上电脑", "关闭电脑",
+        "移动电脑", "收起电脑", "收好电脑", "放回", "放好",
+        "准备用品", "切换物品", "动作看不清", "无法判断",
+    ],
 }
 
-_ACTIVITY_RECLASSIFICATION_ORDER = (
+# 与 EventEngine 共用当前完整事件清单。顺序也作为缺少 segments 时的稳定兜底顺序。
+_ACTIVITY_RECLASSIFICATION_ORDER = tuple(EVENT_TYPES)
+
+# 这些事件表达的是状态变化，不能只凭某一帧里的静态状态成立。
+# VLM 若要把上游候选改判成这些事件，必须给出合法时间片；只有
+# EventEngine 已经给出同类候选时，候选窗口本身才可作为时序证据。
+_TRANSITION_EVENT_TYPES = {
+    "sit_at_study_position",
+    "leave_study_position",
+}
+
+_PHONE_EVENT_TYPES = {"phone_usage"}
+_STUDY_EVENT_TYPES = {
+    "reading",
+    "writing",
+    "computer_usage",
+    "phone_usage",
+    "other_behavior",
+}
+
+# 旧版自然语言兼容入口只推断具体行为。位置词（例如“坐在”）太宽泛，
+# 若混入这里会抢先吞掉“坐在桌前写字”中的真正行为。
+_DESCRIPTION_ACTIVITY_ORDER = (
     "writing",
     "reading",
-    "phone_learning",
-    "computer_learning",
-    "phone_distraction",
-    "computer_distraction",
+    "phone_usage",
+    "computer_usage",
     "communication_distraction",
-    "other_study_behavior",
+    "other_behavior",
 )
+
+_EVENT_TYPE_BY_CN = {
+    event_cn: event_type
+    for event_type, event_cn in EVENT_TYPE_CN.items()
+}
+
+
+def _normalize_event_type_name(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    name = value.strip()
+    if name in EVENT_TYPES:
+        return name
+    return _EVENT_TYPE_BY_CN.get(name)
+
+
+def _event_type_name(value: Any) -> str | None:
+    """只接受当前八事件协议中的正式名称。"""
+    return _normalize_event_type_name(value)
 
 
 def infer_activity_from_description(description: str) -> str | None:
     """从 VLM 描述中的明确动作词纠正 YOLO 产生的活动候选类型。"""
     if not isinstance(description, str):
         return None
-    for event_type in _ACTIVITY_RECLASSIFICATION_ORDER:
+    # 过渡动作不是“低优先级未知项”。当描述明确说正在拿出、收起、
+    # 整理或切换物品时，不能再被同一句中的 book/laptop 名词抢回阅读/电脑。
+    if description_has_transition_evidence(description):
+        return "other_behavior"
+    for event_type in _DESCRIPTION_ACTIVITY_ORDER:
+        if event_type == "other_behavior":
+            continue
         if _description_supports_event(description, event_type):
             return event_type
     return None
 
 
-def _description_supports_event(description: str, event_type: str) -> bool:
-    if event_type == "phone_learning":
-        return any(word in description for word in ("手机", "移动设备")) and any(
-            word in description
-            for word in ("学习资料", "课程", "题目", "背单词", "教材")
-        )
-    if event_type == "computer_learning":
-        return any(word in description for word in ("电脑", "笔记本电脑")) and any(
-            word in description
-            for word in ("学习资料", "课程", "题目", "编程", "教材")
-        )
-    return any(
-        keyword in description
-        for keyword in EVENT_CONTENT_KEYWORDS.get(event_type, [])
+def description_has_transition_evidence(description: str) -> bool:
+    """是否明确描述了准备、收拾或事件切换动作。"""
+    return isinstance(description, str) and _description_supports_event(
+        description,
+        "other_behavior",
     )
+
+
+def _description_supports_event(description: str, event_type: str) -> bool:
+    """仅供“从自然语言描述兜底推断”使用，不否定结构化 events。"""
+    negations = ("没有", "并未", "未在", "未", "不是", "不再", "无")
+    for keyword in EVENT_CONTENT_KEYWORDS.get(event_type, []):
+        start = 0
+        while True:
+            index = description.find(keyword, start)
+            if index < 0:
+                break
+            prefix = description[max(0, index - 5):index]
+            if not any(prefix.endswith(negation) for negation in negations):
+                return True
+            start = index + len(keyword)
+    return False
 
 
 def infer_activity_from_vlm_meta(meta: dict[str, Any]) -> str | None:
@@ -486,12 +733,13 @@ def infer_activity_from_vlm_meta(meta: dict[str, Any]) -> str | None:
 
 def infer_activities_from_vlm_meta(meta: dict[str, Any]) -> list[str]:
     """返回按画面发生顺序排列的全部可信活动。"""
-    description = meta.get("description", "")
-    if not isinstance(description, str):
-        description = ""
-    events = meta.get("events", {})
-    if not isinstance(events, dict):
-        events = {}
+    raw_events = meta.get("events", {})
+    events: dict[str, bool] = {}
+    if isinstance(raw_events, dict):
+        for raw_name, value in raw_events.items():
+            name = _event_type_name(raw_name)
+            if name in _ACTIVITY_RECLASSIFICATION_ORDER:
+                events[name] = events.get(name, False) or _to_bool(value)
 
     activities: list[str] = []
     segments = meta.get("activity_segments", [])
@@ -499,22 +747,21 @@ def infer_activities_from_vlm_meta(meta: dict[str, Any]) -> list[str]:
         for segment in segments:
             if not isinstance(segment, dict):
                 continue
-            event_type = segment.get("event_type")
+            event_type = _event_type_name(segment.get("event_type"))
             if (
                 event_type in _ACTIVITY_RECLASSIFICATION_ORDER
                 and _to_bool(events.get(event_type, False))
-                and _description_supports_event(description, event_type)
                 and event_type not in activities
             ):
                 activities.append(event_type)
 
     observed = meta.get("observed_activities", [])
     if isinstance(observed, list):
-        for event_type in observed:
+        for raw_event_type in observed:
+            event_type = _event_type_name(raw_event_type)
             if (
                 event_type in _ACTIVITY_RECLASSIFICATION_ORDER
                 and _to_bool(events.get(event_type, False))
-                and _description_supports_event(description, event_type)
                 and event_type not in activities
             ):
                 activities.append(event_type)
@@ -522,28 +769,19 @@ def infer_activities_from_vlm_meta(meta: dict[str, Any]) -> list[str]:
     remaining = [
         event_type
         for event_type in _ACTIVITY_RECLASSIFICATION_ORDER
-        if (
-            (
-                _to_bool(events.get(event_type, False))
-                or _description_supports_event(description, event_type)
-            )
-            and _description_supports_event(description, event_type)
-            and event_type not in activities
-        )
+        if _to_bool(events.get(event_type, False)) and event_type not in activities
     ]
-    remaining.sort(
-        key=lambda event_type: min(
-            (
-                description.find(keyword)
-                for keyword in EVENT_CONTENT_KEYWORDS[event_type]
-                if keyword in description
-            ),
-            default=len(description) + _ACTIVITY_RECLASSIFICATION_ORDER.index(event_type),
-        )
-    )
     activities.extend(remaining)
-    if len(activities) > 1 and "other_study_behavior" in activities:
-        activities.remove("other_study_behavior")
+    # other 可以与具体事件出现在同一窗口的不重叠时间片中。只有缺少
+    # other 的合法 segment 时，才把它视为模型误勾的全窗兜底项。
+    if len(activities) > 1 and "other_behavior" in activities:
+        has_other_segment = any(
+            isinstance(segment, dict)
+            and _event_type_name(segment.get("event_type")) == "other_behavior"
+            for segment in segments
+        ) if isinstance(segments, list) else False
+        if not has_other_segment:
+            activities.remove("other_behavior")
     return activities
 
 
@@ -553,39 +791,121 @@ def _reconcile_confirmed_with_description(
     event_cn: str,
     model_confirmed: bool,
 ) -> bool:
-    """
-    代码层兜底：用 description 内容校验 confirmed 是否合理。
-
-    2026-09-03 改写：
-        旧逻辑（suffix 匹配）只检查句尾，无法捕获 VLM 的幻觉
-        （如"坐着用手机"被判为 leave_study_position=true）。
-        新逻辑：检查 description 全文是否包含该事件的特征关键词。
-
-    规则：
-        - confirmed=true，关键词全不在 description → 强制 false
-        - confirmed=false → 保留 false，不用关键词反向制造确认结果
-        - 没有定义关键词的事件类型 → 保留模型原始判断
-    """
-    keywords = EVENT_CONTENT_KEYWORDS.get(event_type, [])
-    if not keywords:
-        return model_confirmed
-
-    # confirmed=true 但没有任何关键词 → VLM 在乱说
-    if model_confirmed and not _description_supports_event(description, event_type):
-        return False
-
+    """结构化 events 是主契约；description 只用于展示和兼容兜底。"""
     return model_confirmed
+
+
+def _append_confirmed_event_labels(
+    description: str,
+    events: dict[str, bool],
+) -> str:
+    """第三步失效时的确定性兜底；绝不反向影响事件判定。"""
+    labels = [
+        EVENT_TYPE_CN[event_type]
+        for event_type in EVENT_TYPES
+        if events.get(event_type, False)
+    ]
+    # 模型可能已自行点题。先移除末尾连续的标准事件名，再按 events 的
+    # 统一顺序追加一次，避免重复，也避免 description 与 events 不一致。
+    known_labels = set(EVENT_TYPE_CN.values())
+    parts = [
+        part.strip()
+        for part in re.split(r"[，,]", description.strip().rstrip("。！？!?；;，, "))
+        if part.strip()
+    ]
+    while parts and parts[-1] in known_labels:
+        parts.pop()
+    base = "，".join(parts)
+    if not labels:
+        return f"{base}。" if base else ""
+    suffix = "，".join(labels)
+    return f"{base}，{suffix}。" if base else f"{suffix}。"
+
+
+def _description_comparison_text(text: str) -> str:
+    """去掉事件标签和标点，用于判断第三步是否仍保留第一步事实。"""
+    result = text
+    for label in sorted(EVENT_TYPE_CN.values(), key=len, reverse=True):
+        result = result.replace(label, "")
+    return re.sub(r"[\s，,。！？!?；;：:]", "", result)
+
+
+def _choose_final_description(
+    objective_description: str,
+    model_final_description: Any,
+    events: dict[str, bool],
+    contract_warnings: list[str],
+) -> tuple[str, str]:
+    """校验第三步最小改写；无效时回退为客观描述加结构化标签。"""
+    if not isinstance(model_final_description, str) or not model_final_description.strip():
+        contract_warnings.append(
+            "final_description 缺失，已使用客观描述与结构化事件生成兜底描述"
+        )
+        return _append_confirmed_event_labels(objective_description, events), "fallback"
+
+    final_description = _compact_description(model_final_description.strip())
+    true_labels = [
+        EVENT_TYPE_CN[name]
+        for name in EVENT_TYPES
+        if events.get(name, False)
+    ]
+    false_labels = [
+        EVENT_TYPE_CN[name]
+        for name in EVENT_TYPES
+        if not events.get(name, False)
+    ]
+    missing_labels = [label for label in true_labels if label not in final_description]
+    forbidden_labels = [label for label in false_labels if label in final_description]
+
+    objective_text = _description_comparison_text(objective_description)
+    final_text = _description_comparison_text(final_description)
+    similarity = (
+        SequenceMatcher(None, objective_text, final_text).ratio()
+        if objective_text and final_text
+        else 1.0
+    )
+    length_limit = min(
+        120,
+        max(40, len(objective_description) + sum(len(label) for label in true_labels) + 28),
+    )
+
+    reasons = []
+    if missing_labels:
+        reasons.append("缺少true事件中文名:" + ",".join(missing_labels))
+    if forbidden_labels:
+        reasons.append("包含false事件中文名:" + ",".join(forbidden_labels))
+    if len(final_description) > length_limit:
+        reasons.append("相对客观描述改写过长")
+    if objective_text and final_text and similarity < 0.45:
+        reasons.append("与客观描述差异过大")
+    if not true_labels and final_description.strip() != objective_description.strip():
+        reasons.append("没有true事件却改写了客观描述")
+
+    if reasons:
+        contract_warnings.append(
+            "final_description 未通过第三步校验（"
+            + "；".join(reasons)
+            + "），已使用确定性兜底"
+        )
+        return _append_confirmed_event_labels(objective_description, events), "fallback"
+
+    if final_description[-1:] not in "。！？!?":
+        final_description += "。"
+    return final_description, "model"
 
 
 def normalize_vlm_result(
     parsed: dict[str, Any],
     event_type: str,
+    frame_count: int | None = None,
 ) -> dict[str, Any]:
     """
     对 parse_json() 的输出做二次校验，
     保证返回值包含以下稳定字段，且类型固定：
 
         event_confirmed: bool
+        objective_description: str
+        final_description: str
         description: str
         is_phone_usage: bool
         is_studying: bool
@@ -594,73 +914,90 @@ def normalize_vlm_result(
     不管Qwen-VL输出多不规范，调用方都不需要再做防御性判断。
     """
 
-    description = parsed.get("description", "")
-
-    if not isinstance(description, str) or not description.strip():
-        description = "[VLM未返回有效description]"
-
-    event_cn = EVENT_TYPE_CN.get(event_type, event_type)
-
-    # prompt 同时输出了 events{} 和 event_confirmed，
-    # 优先取 events[event_type]，event_confirmed 兜底读取。
-    events_dict = parsed.get("events", {})
-    raw_events = {
-        name: _to_bool(events_dict.get(name, False))
-        for name in EVENT_TYPES
-    } if isinstance(events_dict, dict) else {name: False for name in EVENT_TYPES}
-
-    primary_event = parsed.get("primary_event")
-    if isinstance(primary_event, str) and primary_event in raw_events:
-        raw_events[primary_event] = True
-    observed_activities = parsed.get("observed_activities", [])
-    if isinstance(observed_activities, list):
-        for name in observed_activities:
-            if isinstance(name, str) and name in raw_events:
-                raw_events[name] = True
-
-    if raw_events.get(event_type, False):
-        model_confirmed = True
+    candidate_event_type = event_type
+    objective_description = parsed.get("objective_description")
+    if not isinstance(objective_description, str) or not objective_description.strip():
+        # 兼容旧模型输出；旧 description 被视为第一步客观描述。
+        objective_description = parsed.get("description", "")
+    if not isinstance(objective_description, str) or not objective_description.strip():
+        objective_description = "[VLM未返回有效description]"
     else:
-        model_confirmed = _to_bool(parsed.get("event_confirmed", False))
+        objective_description = _compact_description(objective_description.strip())
 
-    reconciled_confirmed = _reconcile_confirmed_with_description(
-        description=description,
-        event_type=event_type,
-        event_cn=event_cn,
-        model_confirmed=model_confirmed,
+    # 新契约中 events 是唯一分类依据。primary_event、observed_activities
+    # 和 activity_segments 只描述顺序/时间，不允许把 events=false 反向改成 true。
+    events_dict = parsed.get("events", {})
+    # 只要模型显式返回了 events，就采用严格新契约；即使它为空或类型错误，
+    # 也不能再由 primary/description/event_confirmed 偷偷制造确认事件。
+    events_supplied = "events" in parsed
+    normalized_event_values = {name: False for name in EVENT_TYPES}
+    if isinstance(events_dict, dict):
+        for raw_name, value in events_dict.items():
+            name = _normalize_event_type_name(raw_name)
+            if name in normalized_event_values:
+                normalized_event_values[name] = _to_bool(value)
+    raw_events = normalized_event_values
+
+    raw_primary_event = _normalize_event_type_name(parsed.get("primary_event"))
+    primary_event = _event_type_name(parsed.get("primary_event"))
+    raw_observed_activities = parsed.get("observed_activities", [])
+    raw_observed_event_names = (
+        [
+            name
+            for item in raw_observed_activities
+            if (name := _normalize_event_type_name(item)) is not None
+        ]
+        if isinstance(raw_observed_activities, list)
+        else []
     )
+    observed_activities = list(dict.fromkeys(raw_observed_event_names))
+    raw_segments = parsed.get("activity_segments", [])
+    if not events_supplied:
+        # 仅兼容旧调用方；有 events 时绝不使用其他字段升级结果。
+        legacy_names = []
+        if isinstance(primary_event, str):
+            legacy_names.append(primary_event)
+        if isinstance(observed_activities, list):
+            legacy_names.extend(observed_activities)
+        if isinstance(raw_segments, list):
+            legacy_names.extend(
+                _event_type_name(segment.get("event_type"))
+                for segment in raw_segments
+                if isinstance(segment, dict)
+            )
+        for name in legacy_names:
+            if name in raw_events:
+                raw_events[name] = True
+        if not any(raw_events.values()) and _to_bool(parsed.get("event_confirmed", False)):
+            raw_events[candidate_event_type] = True
 
-    normalized_events = {}
-    for name in EVENT_TYPES:
-        normalized_events[name] = _reconcile_confirmed_with_description(
-            description=description,
-            event_type=name,
-            event_cn=EVENT_TYPE_CN.get(name, name),
-            model_confirmed=raw_events[name],
-        )
-
-    normalized_observed = [
-        name
-        for name in observed_activities
-        if isinstance(name, str) and normalized_events.get(name, False)
-    ] if isinstance(observed_activities, list) else []
+    contract_warnings: list[str] = []
+    parse_error = parsed.get("_parse_error")
+    if isinstance(parse_error, str) and parse_error:
+        contract_warnings.append(parse_error)
+    raw_events_snapshot = dict(raw_events)
 
     normalized_segments = []
-    raw_segments = parsed.get("activity_segments", [])
     if isinstance(raw_segments, list):
         for segment in raw_segments:
             if not isinstance(segment, dict):
                 continue
-            name = segment.get("event_type")
+            name = _event_type_name(segment.get("event_type"))
             try:
                 start_frame = int(segment.get("start_frame", 0))
                 end_frame = int(segment.get("end_frame", 0))
             except (TypeError, ValueError):
                 continue
+            within_frame_range = (
+                frame_count is None
+                or frame_count <= 0
+                or end_frame <= frame_count
+            )
             if (
                 isinstance(name, str)
-                and normalized_events.get(name, False)
+                and raw_events.get(name, False)
                 and start_frame >= 1
+                and within_frame_range
                 and end_frame >= start_frame
             ):
                 normalized_segments.append(
@@ -670,21 +1007,283 @@ def normalize_vlm_result(
                         "end_frame": end_frame,
                     }
                 )
+            elif isinstance(name, str) and name in raw_events:
+                contract_warnings.append(
+                    f"忽略与 events 不一致或帧区间无效的 segment: {segment!r}"
+                )
     normalized_segments.sort(key=lambda item: item["start_frame"])
 
+    represented_types = {item["event_type"] for item in normalized_segments}
+
+    # events 是模型第二步的原始判断，但正式事件还必须满足模型自己承诺的
+    # 时序契约。有合法 segment 的事件可信；上游候选已有 EventEngine
+    # 的时序证据；primary_event 可用于改判，但状态转换事件改判时仍必须
+    # 给出 segment，防止一帧静态画面同时制造“开始”和“结束”。
+    supported_types = set(represented_types)
+    candidate_confirmed = raw_events.get(candidate_event_type, False)
+    primary_has_segment = primary_event in represented_types
+    if candidate_confirmed:
+        # 通用 other 候选若已被 VLM 明确改判成具体主事件，不再与主事件
+        # 并列保留；但 other 自己有合法时间片时，它代表真实过渡动作，
+        # 不再只是上游占位符。
+        if not (
+            candidate_event_type == "other_behavior"
+            and isinstance(primary_event, str)
+            and primary_event != candidate_event_type
+            and raw_events.get(primary_event, False)
+            and candidate_event_type not in represented_types
+        ):
+            supported_types.add(candidate_event_type)
+    if isinstance(primary_event, str) and raw_events.get(primary_event, False):
+        if (
+            primary_event not in _TRANSITION_EVENT_TYPES
+            or primary_event == candidate_event_type
+            or primary_has_segment
+        ):
+            # 没有任何 segment 时，一个明确的原候选优先于不同的主事件，
+            # 防止“入座候选”同时整窗生成“其他/准备”。有真实 segment
+            # 时则允许两个事件按各自区间并存。
+            if (
+                primary_has_segment
+                or not candidate_confirmed
+                or primary_event == candidate_event_type
+                or candidate_event_type == "other_behavior"
+            ):
+                supported_types.add(primary_event)
+
+    raw_true_types = [name for name, confirmed in raw_events.items() if confirmed]
+    # 兼容最小但明确的输出：如果只有一个非状态转换事件为 true，即使
+    # 2B 漏写 primary/segment，也允许它改判，不再因为小格式错误清零。
+    if len(raw_true_types) == 1 and raw_true_types[0] not in _TRANSITION_EVENT_TYPES:
+        supported_types.add(raw_true_types[0])
+    # 歧义窗口会被 Runtime 拆成约 4 秒、最多 5 张图的短序列重新判断。
+    # 这时整段本身已经提供了连续时序证据，允许唯一的位置变化主事件
+    # 在漏写 segment 时成立；完整 8 秒窗口仍维持严格分段要求。
+    if (
+        frame_count is not None
+        and 1 < frame_count <= 5
+        and len(raw_true_types) == 1
+        and raw_true_types[0] in _TRANSITION_EVENT_TYPES
+        and primary_event == raw_true_types[0]
+    ):
+        supported_types.add(raw_true_types[0])
+
+    normalized_events = {
+        name: bool(confirmed and name in supported_types)
+        for name, confirmed in raw_events.items()
+    }
+    dropped_true_types = [
+        name
+        for name in raw_true_types
+        if not normalized_events.get(name, False)
+    ]
+    if dropped_true_types:
+        contract_warnings.append(
+            "已忽略缺少时序证据且不是候选/主事件的 events=true: "
+            + ", ".join(dropped_true_types)
+        )
+
+    normalized_segments = [
+        segment
+        for segment in normalized_segments
+        if normalized_events.get(segment["event_type"], False)
+    ]
+
+    def has_ordered_transition(first: str, second: str) -> bool:
+        first_segments = [
+            segment for segment in normalized_segments
+            if segment["event_type"] == first
+        ]
+        second_segments = [
+            segment for segment in normalized_segments
+            if segment["event_type"] == second
+        ]
+        return any(
+            first_segment["end_frame"] < second_segment["start_frame"]
+            for first_segment in first_segments
+            for second_segment in second_segments
+        )
+
+    for first, second in (
+        ("sit_at_study_position", "leave_study_position"),
+    ):
+        if not (normalized_events.get(first) and normalized_events.get(second)):
+            continue
+        if has_ordered_transition(first, second):
+            continue
+
+        keep = candidate_event_type if candidate_event_type in (first, second) else None
+        if keep is None and primary_event in (first, second):
+            keep = primary_event
+        for name in (first, second):
+            if name != keep:
+                normalized_events[name] = False
+        contract_warnings.append(
+            f"{first} 与 {second} 缺少先后分离的时间片，"
+            + (f"仅保留 {keep}" if keep else "已全部忽略")
+        )
+
+    # 三步结果一致性修复：2B 模型偶尔能在第一步准确写出“使用笔记本
+    # 电脑”，却在第二步漏勾布尔值。仅当第二步没有任何具体行为（或只勾
+    # 了 other）时，才用第一步中的明确正向动作补回一个具体行为。
+    concrete_behaviors = {
+        "reading",
+        "writing",
+        "phone_usage",
+        "computer_usage",
+        "communication_distraction",
+    }
+    description_activity = infer_activity_from_description(objective_description)
+    confirmed_concrete = {
+        name for name in concrete_behaviors if normalized_events.get(name, False)
+    }
+    if description_activity in concrete_behaviors and not confirmed_concrete:
+        normalized_events[description_activity] = True
+        normalized_events["other_behavior"] = False
+        primary_event = description_activity
+        if description_activity not in observed_activities:
+            observed_activities.append(description_activity)
+        contract_warnings.append(
+            "events 与 objective_description 不一致，已按明确动作修复为 "
+            + description_activity
+        )
+
+    # 明确的准备/收拾动作可以推翻无分段的具体事件。这里要求描述中存在
+    # 动作短语，而不是仅凭“书/电脑”等名词，因此不会把正常学习中的
+    # 偶发物体误改成 other。混合窗口已有合法分段时则保留各阶段。
+    has_other_segment = any(
+        segment["event_type"] == "other_behavior"
+        for segment in normalized_segments
+    )
+    has_concrete_segment = any(
+        segment["event_type"] in concrete_behaviors
+        for segment in normalized_segments
+    )
+    if (
+        description_activity == "other_behavior"
+        and not (has_other_segment and has_concrete_segment)
+    ):
+        replaced = [
+            name for name in concrete_behaviors
+            if normalized_events.get(name, False)
+        ]
+        for name in replaced:
+            normalized_events[name] = False
+        normalized_events["other_behavior"] = True
+        primary_event = "other_behavior"
+        if "other_behavior" not in observed_activities:
+            observed_activities.append("other_behavior")
+        if replaced:
+            contract_warnings.append(
+                "客观描述包含明确整理/准备动作，已将无分段具体事件改为 other_behavior: "
+                + ", ".join(sorted(replaced))
+            )
+        elif not confirmed_concrete:
+            contract_warnings.append(
+                "events 与 objective_description 不一致，已按明确过渡动作修复为 other_behavior"
+            )
+
+    # other 与具体行为只有在合法、不重叠的时间片中才能并存。没有分段时，
+    # 优先遵循明确的过渡描述/primary；否则保留具体事件并取消误勾的 other。
+    if any(normalized_events.get(name, False) for name in concrete_behaviors):
+        if normalized_events.get("other_behavior", False):
+            other_segments = [
+                segment for segment in normalized_segments
+                if segment["event_type"] == "other_behavior"
+            ]
+            concrete_segments = [
+                segment for segment in normalized_segments
+                if segment["event_type"] in concrete_behaviors
+            ]
+            segments_are_separate = bool(other_segments and concrete_segments) and all(
+                other["end_frame"] < concrete["start_frame"]
+                or concrete["end_frame"] < other["start_frame"]
+                for other in other_segments
+                for concrete in concrete_segments
+            )
+            if not segments_are_separate:
+                if primary_event == "other_behavior" or description_activity == "other_behavior":
+                    for name in concrete_behaviors:
+                        normalized_events[name] = False
+                    contract_warnings.append(
+                        "other_behavior 与具体行为缺少不重叠分段，已保留明确过渡行为"
+                    )
+                else:
+                    normalized_events["other_behavior"] = False
+                    contract_warnings.append(
+                        "other_behavior 与具体行为缺少不重叠分段，已保留具体行为"
+                    )
+
+    normalized_segments = [
+        segment
+        for segment in normalized_segments
+        if normalized_events.get(segment["event_type"], False)
+    ]
+    normalized_observed = [
+        name
+        for name in observed_activities
+        if isinstance(name, str) and normalized_events.get(name, False)
+    ] if isinstance(observed_activities, list) else []
+    description, final_description_source = _choose_final_description(
+        objective_description,
+        parsed.get("final_description"),
+        normalized_events,
+        contract_warnings,
+    )
+
+    final_event_confirmed = any(confirmed for confirmed in normalized_events.values())
+    if _to_bool(parsed.get("event_confirmed", False)) != final_event_confirmed:
+        contract_warnings.append("event_confirmed 与 events 不一致，已以 events 为准")
+
+    # primary_event 兜底：如果 VLM 写了 "none" 但存在 true 事件，取第一个 true 事件
+    final_primary = primary_event
+    if (
+        not isinstance(final_primary, str)
+        or final_primary == "none"
+        or not normalized_events.get(final_primary, False)
+    ):
+        for name, confirmed in normalized_events.items():
+            if confirmed:
+                final_primary = name
+                break
+        else:
+            final_primary = "none"
+
+    normalized_phone_usage = _to_bool(parsed.get("is_phone_usage", False))
+    phone_event_confirmed = any(
+        normalized_events.get(name, False) for name in _PHONE_EVENT_TYPES
+    )
+    if phone_event_confirmed and not normalized_phone_usage:
+        normalized_phone_usage = True
+        contract_warnings.append(
+            "手机事件为 true 但 is_phone_usage=false，已按结构化事件修正为 true"
+        )
+
+    normalized_studying = _to_bool(parsed.get("is_studying", False))
+    study_event_confirmed = any(
+        normalized_events.get(name, False) for name in _STUDY_EVENT_TYPES
+    )
+    if study_event_confirmed and not normalized_studying:
+        normalized_studying = True
+        contract_warnings.append(
+            "学习事件为 true 但 is_studying=false，已按结构化事件修正为 true"
+        )
+
     return {
-        "event_confirmed": reconciled_confirmed,
+        "event_confirmed": final_event_confirmed,
+        "objective_description": objective_description,
+        "final_description": description,
+        "final_description_source": final_description_source,
         "description": description,
-        "is_phone_usage": _to_bool(parsed.get("is_phone_usage", False)),
-        "is_studying": _to_bool(parsed.get("is_studying", False)),
+        "is_phone_usage": normalized_phone_usage,
+        "is_studying": normalized_studying,
         "events": normalized_events,
-        "primary_event": (
-            primary_event
-            if isinstance(primary_event, str) and normalized_events.get(primary_event, False)
-            else "none"
-        ),
+        "raw_events": raw_events_snapshot,
+        "primary_event": final_primary,
         "observed_activities": normalized_observed,
         "activity_segments": normalized_segments,
+        "contract_warnings": contract_warnings,
+        "parse_error": parse_error if isinstance(parse_error, str) else "",
     }
 
 
@@ -828,17 +1427,11 @@ def analyze_event(
 
     注意：
 
-        event.event_type由A决定。
+        event.event_type 是 A 给出的弱候选，不是最终结论。
 
-        B / Qwen-VL：
-            不修改event_type。
-
-        B只负责：
-            观察视频帧
-            ↓
-            分析真实动作
-            ↓
-            生成description
+        B / Qwen-VL 对完整事件清单输出结构化 events；它可以否定候选、
+        改成其他类型或确认多个连续事件。为保持 Event 数据类接口兼容，
+        本函数把最终类型放在 meta 中，由 Runtime 重建最终 Event。
     """
 
     # ========================================================
@@ -855,7 +1448,8 @@ def analyze_event(
             "event.event_type cannot be empty"
         )
 
-    if event.event_type not in EVENT_TYPES:
+    candidate_event_type = event.event_type
+    if candidate_event_type not in EVENT_TYPES:
         raise ValueError(
             f"Unknown event_type: {event.event_type!r}. "
             f"Allowed events: {EVENT_TYPES}"
@@ -878,7 +1472,12 @@ def analyze_event(
     # 构造Prompt
     # ========================================================
 
-    prompt = build_activity_prompt(event.event_type)
+    prompt = build_activity_prompt(
+        candidate_event_type,
+        frame_count=len(frame_paths),
+        candidate_scores=event.candidate_scores,
+        unclassified_ratio=event.unclassified_ratio,
+    )
 
     # ========================================================
     # 调用Qwen-VL
@@ -898,6 +1497,13 @@ def analyze_event(
     parsed = parse_json(
         raw_output
     )
+    if parsed.get("_parse_error"):
+        print(
+            f"[VLM解析] 失败 | 原始输出长度={len(raw_output)} | "
+            f"已抢救描述={parsed.get('description', '')}"
+        )
+    else:
+        print(f"[VLM解析] 成功 | 原始输出长度={len(raw_output)}")
 
     # ========================================================
     # 字段规范化（新增）
@@ -907,10 +1513,51 @@ def analyze_event(
     # 之后无论parsed里是什么脏数据，meta都是可信的。
     # ========================================================
 
-    meta = normalize_vlm_result(parsed, event_type=event.event_type)
+    meta = normalize_vlm_result(
+        parsed,
+        event_type=candidate_event_type,
+        frame_count=len(frame_paths),
+    )
+    raw_true = [
+        name for name, value in meta.get("raw_events", {}).items() if value
+    ]
+    final_true = [
+        name for name, value in meta.get("events", {}).items() if value
+    ]
+    print(
+        f"[VLM判断] 原始true={raw_true or ['无']} | "
+        f"校验后true={final_true or ['无']} | "
+        f"primary={meta.get('primary_event', 'none')} | "
+        f"segments={meta.get('activity_segments', [])}"
+    )
+    print(
+        "[VLM三步] "
+        f"①客观描述={meta.get('objective_description', '')} | "
+        f"②事件={final_true or ['无']} | "
+        f"③最终描述={meta.get('final_description', '')} | "
+        f"来源={meta.get('final_description_source', 'unknown')}"
+    )
+    for warning in meta.get("contract_warnings", []):
+        print(f"[VLM Contract Warning] {warning}")
+
+    # 把 VLM 原始输出注入 meta，方便全链路 debug
+    meta["_vlm_raw"] = raw_output
 
     # ========================================================
-    # 只补充description
+    # VLM 可推翻任意上游候选。Runtime 读取 confirmed_event_type、events
+    # 和 activity_segments，重建最终要写入 Memory 的 Event。
+    # ========================================================
+    primary = meta.get("primary_event")
+    if isinstance(primary, str) and meta["events"].get(primary, False):
+        meta["confirmed_event_type"] = primary
+    else:
+        meta["confirmed_event_type"] = next(
+            (name for name, confirmed in meta["events"].items() if confirmed),
+            event.event_type,
+        )
+
+    # ========================================================
+    # 这里仅原地补充 description；event_type 的最终回写由 Runtime 完成。
     # ========================================================
 
     event.description = meta["description"]
@@ -919,22 +1566,7 @@ def analyze_event(
     # event_confirmed 日志（改用规范化后的meta，避免脏值）
     # ========================================================
 
-    if meta["event_confirmed"]:
-
-        print(
-            "[VLM Confirmed] "
-            f"画面支持事件："
-            f"{event.event_type}"
-        )
-
-    else:
-
-        print(
-            "[VLM Warning] "
-            f"画面证据可能不支持事件："
-            f"{event.event_type}"
-        )
-
+    if not meta["event_confirmed"]:
         # ====================================================
         # event_confirmed=false 的下游处理（与A讨论后确定）：
         #
@@ -1014,7 +1646,10 @@ def classify_frames_standalone(
         model=model,
         processor=processor,
         image_paths=frame_paths,
-        prompt=CLASSIFY_PROMPT,
+        prompt=build_activity_prompt(
+            "other_behavior",
+            frame_count=len(frame_paths),
+        ),
     )
 
     return parse_json(
@@ -1028,7 +1663,7 @@ def classify_frames_standalone(
 # 对应组长要求：
 #     "3. 检查不同事件类型下的识别效果"
 #
-# 用同一组真实关键帧，依次套用14种event_type对应的Prompt，
+    # 用同一组真实关键帧，一次判断当前完整事件清单，
 # 一次性看出哪些事件类型的Prompt效果差、容易误判，
 # 避免明天只能一个一个手动跑。
 #
@@ -1046,13 +1681,13 @@ def test_all_event_types(
 ) -> dict[str, dict[str, Any]]:
     """
     用同一组frame_paths，调用一次VLM，
-    让它一次性判断全部14种event_type是否发生。
+    让它一次性判断当前全部event_type是否发生。
 
     返回：
         {event_type: meta, ...}
         每个event_type的confirmed直接来自VLM对"events"字段的判断。
 
-    一次调用，由VLM看完所有帧后输出14个事件的判断，
+    一次调用，由VLM看完所有帧后输出八个事件的判断，
     每个event_type的confirmed直接来自VLM对"events"字段的输出。
     """
 
@@ -1063,9 +1698,10 @@ def test_all_event_types(
 
     t0 = time.time()
 
-    from .prompt import build_all_events_prompt
-
-    prompt = build_all_events_prompt()
+    prompt = build_activity_prompt(
+        "other_behavior",
+        frame_count=len(frame_paths),
+    )
 
     raw_output = run_vlm(
         model=model,
@@ -1157,7 +1793,7 @@ def main():
         "--test_all_events",
         action="store_true",
         help=(
-            "用同一组--image，依次测试全部14种event_type，"
+            "用同一组--image测试当前全部event_type，"
             "用于检查不同事件类型下的识别效果（忽略--event_type）。"
         ),
     )
@@ -1206,7 +1842,7 @@ def main():
         latency = time.time() - t0
 
         print(
-            f"\n[全部14种事件类型测试完成] "
+            f"\n[全部事件类型测试完成] "
             f"总耗时 {latency:.2f} 秒"
         )
 

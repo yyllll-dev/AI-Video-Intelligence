@@ -5,6 +5,7 @@ import numpy as np
 
 from src.pipeline.media_archive import (
     FileKeyframeExtractor,
+    LiveEvidenceCollector,
     RollingVideoRecorder,
     VideoClipExporter,
     prepare_browser_video,
@@ -105,3 +106,15 @@ def test_live_recorder_segments_and_exports_replay(tmp_path):
 
     assert Path(replay_path).is_file()
     assert video_duration(replay_path) >= 3.0
+
+
+def test_live_evidence_merges_candidate_changes_in_same_window(tmp_path):
+    collector = LiveEvidenceCollector(tmp_path / "evidence", interval_seconds=0.0)
+    frame = np.zeros((24, 32, 3), dtype=np.uint8)
+    collector.observe("phone_usage", 2.0, frame, 2.0)
+    collector.observe("reading", 2.0, frame, 4.0)
+
+    paths = collector.finish("reading", 2.0, frame, 8.0)
+
+    assert len(paths) == 3
+    assert collector._events == {}

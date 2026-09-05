@@ -27,7 +27,7 @@ def mock_detections():
 def mock_current_event():
     """当前正在发生的事件（模拟 EventEngine 输出）。"""
     return {
-        "event_type": "phone_distraction",
+        "event_type": "phone_usage",
         "start_time": "10:32",
         "end_time": "10:40",
         "track_id": 1,

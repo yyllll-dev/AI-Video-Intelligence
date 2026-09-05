@@ -23,15 +23,9 @@ B 模块职责：
 """
 
 import os
+from functools import lru_cache
 from pathlib import Path
 from typing import Optional
-
-from modelscope import snapshot_download
-from transformers import (
-    Qwen2VLForConditionalGeneration,
-    AutoProcessor,
-)
-
 
 # ============================================================
 # 模型配置
@@ -50,9 +44,10 @@ MODEL_NAME = "Qwen/Qwen2-VL-2B-Instruct"
 # 模型加载
 # ============================================================
 
-def load_model(
+@lru_cache(maxsize=1)
+def _load_model_cached(
     device_map: str = "auto",
-    model_path: Optional[str] = None,
+    configured_path: Optional[str] = None,
 ):
     """
     加载 Qwen2-VL 模型和 Processor。
@@ -74,8 +69,6 @@ def load_model(
             Qwen2-VL Processor
     """
 
-    configured_path = model_path or os.getenv("QWEN_VL_MODEL_PATH")
-
     # --------------------------------------------------------
     # 1. 下载或定位模型
     # --------------------------------------------------------
@@ -88,6 +81,12 @@ def load_model(
             )
         print(f"[模型] 使用本地目录：{model_dir}")
     else:
+        try:
+            from modelscope import snapshot_download
+        except ImportError as exc:
+            raise RuntimeError(
+                "未提供本地 Qwen 模型路径，且缺少 modelscope，无法下载模型"
+            ) from exc
         print(
             f"[模型] 正在通过 ModelScope 下载/定位：{MODEL_NAME}"
         )
@@ -102,6 +101,13 @@ def load_model(
     # --------------------------------------------------------
 
     print("[模型] 正在加载 Qwen2-VL ...")
+
+    try:
+        from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
+    except ImportError as exc:
+        raise RuntimeError(
+            "当前环境缺少支持 Qwen2-VL 的 transformers"
+        ) from exc
 
     model = Qwen2VLForConditionalGeneration.from_pretrained(
         model_dir,
@@ -120,3 +126,19 @@ def load_model(
     print("[模型加载完成]")
 
     return model, processor
+
+
+def load_model(
+    device_map: str = "auto",
+    model_path: Optional[str] = None,
+):
+    """加载或复用当前进程中的 Qwen2-VL 模型与 Processor。"""
+    configured_path = model_path or os.getenv("QWEN_VL_MODEL_PATH")
+    if configured_path:
+        configured_path = str(Path(configured_path).expanduser().resolve())
+
+    hits_before = _load_model_cached.cache_info().hits
+    result = _load_model_cached(device_map, configured_path)
+    if _load_model_cached.cache_info().hits > hits_before:
+        print("[模型] 复用当前进程中已加载的 Qwen2-VL，无需重新加载权重")
+    return result

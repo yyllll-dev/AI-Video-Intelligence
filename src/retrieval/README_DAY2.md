@@ -8,12 +8,12 @@
 
 ## 已完成内容
 
-1. 直接使用 `src.event.event_types.ALL_EVENTS` 作为 14 种正式事件名称的唯一来源。
-2. 新增 14 种事件的中文含义和常见问法，支持“玩手机”“看书”“离开座位”等自然语言查询。
+1. 直接使用 `src.event.event_types.ALL_EVENTS` 作为 8 种正式事件名称的唯一来源。
+2. 新增 8 种事件的中文含义和常见问法，支持“使用手机”“看书”“离开座位”等自然语言查询。
 3. `Event -> MemoryRecord -> Embedding -> MemoryStore -> SearchResult` 主流程保持不变。
 4. `VideoMemoryService` 默认使用轻量 `EventQueryProcessor`，把自然语言问法补充为正式事件名称。
 5. 保存和检索前校验 Embedding 维度与数值，错误向量不会进入 MemoryStore。
-6. 新增测试，覆盖真实 `Event`、全部 14 种事件、自然语言检索和替换 Embedding 实现。
+6. 新增测试，覆盖真实 `Event`、全部 8 种事件、自然语言检索和替换 Embedding 实现。
 
 ## 接口未改动
 

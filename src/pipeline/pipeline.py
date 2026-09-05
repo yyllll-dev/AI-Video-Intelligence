@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from dataclasses import asdict, is_dataclass
+import json
 from typing import Any, Optional
 
 from ..detection.detector import DetectionResult
@@ -50,6 +52,7 @@ class VideoPipeline:
             Callable[[list[dict[str, Any]], float], Iterable[Any]]
         ] = None,
         event_engine: Optional[EventEngine] = None,
+        trace: bool = False,
     ):
         """
         创建视频分析 Pipeline。
@@ -67,6 +70,7 @@ class VideoPipeline:
         self.detector = detector
         self.tracker = tracker
         self.event_engine = event_engine or EventEngine()
+        self.trace = trace
 
         # 后续模块暂时预留
         self.vlm = None
@@ -98,10 +102,20 @@ class VideoPipeline:
         # 1. Detection
         # =====================================================
 
+        self._trace(
+            "FRAME",
+            {
+                "frame_id": video_frame.frame_id,
+                "timestamp": round(video_frame.timestamp, 3),
+                "shape": list(video_frame.frame.shape),
+            },
+        )
+
         if self.detector:
             detections = list(self.detector(video_frame))
         else:
             detections = []
+        self._trace("YOLO_OUTPUT", detections)
 
         # =====================================================
         # 2. 将 DetectionResult 转成 Tracker 能理解的格式
@@ -141,14 +155,24 @@ class VideoPipeline:
             )
             for index, item in enumerate(tracked_items)
         ]
+        self._trace("TRACKER_OUTPUT", tracking_results)
 
         # =====================================================
         # 5. Event
         # =====================================================
 
+        state_before = self.event_engine.debug_state()
         events = self.event_engine.update(
             tracking_results,
             timestamp=video_frame.timestamp,
+        )
+        self._trace(
+            "EVENT_OUTPUT",
+            {
+                "state_before": state_before,
+                "state_after": self.event_engine.debug_state(),
+                "emitted_events": events,
+            },
         )
 
         # =====================================================
@@ -165,6 +189,20 @@ class VideoPipeline:
             "vlm_results": vlm_results,
             "memory_result": memory_result,
         }
+
+    def _trace(self, stage: str, payload: Any) -> None:
+        if not self.trace:
+            return
+
+        def default(value: Any):
+            if is_dataclass(value):
+                return asdict(value)
+            return repr(value)
+
+        print(
+            f"[TRACE][{stage}] "
+            + json.dumps(payload, ensure_ascii=False, default=default)
+        )
 
     @staticmethod
     def _as_detection(item: Any) -> dict[str, Any]:

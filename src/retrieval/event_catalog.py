@@ -28,18 +28,6 @@ EVENT_SEARCH_TERMS: dict[str, EventSearchTerms] = {
         "离开学习位置",
         ("离开学习位置", "离开座位", "起身离开", "不在座位"),
     ),
-    "study_preparation": EventSearchTerms(
-        "学习准备",
-        ("学习准备", "准备学习", "准备文具", "摆放书本"),
-    ),
-    "start_study": EventSearchTerms(
-        "开始学习",
-        ("开始学习", "进入学习状态", "正式学习"),
-    ),
-    "end_study": EventSearchTerms(
-        "结束学习",
-        ("结束学习", "停止学习", "学习结束"),
-    ),
     "reading": EventSearchTerms(
         "阅读",
         ("阅读资料", "阅读", "读书", "看书"),
@@ -48,9 +36,13 @@ EVENT_SEARCH_TERMS: dict[str, EventSearchTerms] = {
         "书写",
         ("写作业", "记笔记", "书写", "写字", "做题"),
     ),
-    "phone_learning": EventSearchTerms(
-        "使用手机学习",
+    "phone_usage": EventSearchTerms(
+        "使用手机",
         (
+            "使用手机",
+            "看手机",
+            "玩手机",
+            "刷手机",
             "用手机查学习资料",
             "用手机查资料",
             "手机查资料",
@@ -59,29 +51,20 @@ EVENT_SEARCH_TERMS: dict[str, EventSearchTerms] = {
             "手机搜题",
         ),
     ),
-    "computer_learning": EventSearchTerms(
-        "使用电脑学习",
-        ("用电脑学习", "电脑查资料", "电脑学习", "上网课"),
+    "computer_usage": EventSearchTerms(
+        "使用电脑",
+        (
+            "使用电脑", "用电脑", "看电脑", "操作电脑", "笔记本电脑", "电脑", "玩电脑",
+            "电脑游戏", "打游戏", "用电脑学习", "电脑查资料", "电脑学习", "上网课",
+        ),
     ),
-    "other_study_behavior": EventSearchTerms(
-        "其他学习行为",
-        ("其他学习行为", "其它学习行为"),
-    ),
-    "phone_distraction": EventSearchTerms(
-        "手机分心",
-        ("手机分心", "玩手机", "刷手机", "看手机", "使用手机", "手机"),
-    ),
-    "computer_distraction": EventSearchTerms(
-        "电脑分心",
-        ("电脑分心", "玩电脑游戏", "电脑游戏", "玩电脑", "打游戏"),
+    "other_behavior": EventSearchTerms(
+        "其他",
+        ("其他", "其它", "其他行为", "整理物品", "收拾东西", "无法判断"),
     ),
     "communication_distraction": EventSearchTerms(
         "交流分心",
         ("与人交流", "交流分心", "和别人聊天", "聊天", "说话"),
-    ),
-    "study_end_cleanup": EventSearchTerms(
-        "学习结束整理",
-        ("学习结束整理", "收拾学习用品", "收拾书本", "整理桌面"),
     ),
 }
 
@@ -101,8 +84,7 @@ if _missing_event_types or _extra_event_types:
 def match_event_type(text: str) -> str | None:
     """从事件名称或常见中文问法中识别正式事件名称。
 
-    匹配时优先采用最长短语，避免“用手机查学习资料”被较短的“手机”误判为
-    ``phone_distraction``。
+    匹配时优先采用最长短语。
     """
 
     normalized = "".join(text.lower().split())

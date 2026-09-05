@@ -88,7 +88,9 @@ def test_pipeline_advances_absence_with_empty_frame():
     pipeline.process_frame(make_frame(2.0, 60))
     pipeline.detector = lambda _frame: []
 
-    result = pipeline.process_frame(make_frame(4.0, 120))
+    assert pipeline.process_frame(make_frame(4.0, 120))["events"] == []
+    assert pipeline.process_frame(make_frame(5.0, 150))["events"] == []
+    result = pipeline.process_frame(make_frame(6.0, 180))
 
     assert [event.event_type for event in result["events"]] == [
         EVENT_LEAVE_STUDY_POSITION

@@ -9,6 +9,7 @@ from .embedding import EmbeddingProvider, cosine_similarity
 from .event_catalog import build_event_embedding_text, match_event_type
 from .memory import MemoryStore
 from .models import EventLike, MemoryRecord, SearchResult
+from ..event.event_types import ALL_EVENTS
 
 
 class QueryProcessor(Protocol):
@@ -75,12 +76,17 @@ class VideoMemoryService:
     ) -> MemoryRecord:
         """接收 A/B 模块事件，生成向量并保存为一条视频记忆。"""
 
-        memory_caption = (caption or event.description or event.event_type).strip()
+        original_event_type = event.event_type.strip()
+        final_event_type = original_event_type
+        if final_event_type not in ALL_EVENTS:
+            raise ValueError(f"未知正式事件类型：{original_event_type}")
+        memory_caption = (caption or event.description or final_event_type).strip()
         embedding_text = build_event_embedding_text(
-            event.event_type,
+            final_event_type,
             memory_caption,
         )
         embedding = self._encode(embedding_text)
+        final_metadata = dict(metadata or {})
         record = MemoryRecord.from_event(
             event,
             embedding=embedding,
@@ -88,8 +94,9 @@ class VideoMemoryService:
             caption=memory_caption,
             screenshot_path=screenshot_path,
             video_path=video_path,
-            metadata=metadata,
+            metadata=final_metadata,
         )
+        record.event_type = final_event_type
         self._store.add(record)
         return record
 
