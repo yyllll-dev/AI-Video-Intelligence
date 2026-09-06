@@ -305,6 +305,7 @@ def test_finalize_closes_activity_without_fabricating_end_study():
     assert event_types(events) == [EVENT_READING]
     assert events[0].start_time == 2.0
     assert events[0].end_time == 10.0
+    assert events[0].is_final_window is True
 
 
 def test_finalize_does_not_extend_activity_through_unconfirmed_absence():

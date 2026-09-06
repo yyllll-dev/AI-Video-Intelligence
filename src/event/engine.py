@@ -963,6 +963,7 @@ class EventEngine:
         )
         activity_event = self._finish_activity_window(activity_end)
         if activity_event is not None:
+            activity_event.is_final_window = True
             events.append(activity_event)
 
         self._reset_learning_state(keep_person=False, reason="finalize")

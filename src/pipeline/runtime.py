@@ -23,6 +23,10 @@ from ..retrieval import HashingEmbedder, InMemoryStore, VideoMemoryService
 from ..tracking.tracker import SimpleTracker
 from ..vlm.inference import (
     analyze_event,
+    analyze_frame_labels,
+    analyze_position_transition,
+    analyze_window_label,
+    description_conflicts_with_event,
     description_has_transition_evidence,
     infer_activity_from_description,
     infer_activities_from_vlm_meta,
@@ -42,6 +46,9 @@ from .video_buffer import VideoBuffer
 
 
 EventAnalyzer = Callable[[Event, list[str]], tuple[Optional[Event], dict[str, Any]]]
+BoundaryAnalyzer = Callable[[list[str]], dict[str, Any]]
+PositionAnalyzer = Callable[[list[str], str], dict[str, Any]]
+WindowLabelAnalyzer = Callable[[list[str]], dict[str, Any]]
 
 _VLM_EVENT_TYPES = frozenset(ALL_EVENTS)
 _BEHAVIOR_EVENT_TYPES = frozenset(
@@ -84,6 +91,9 @@ class EndToEndRunner:
         tracker=None,
         event_engine: Optional[EventEngine] = None,
         event_analyzer: Optional[EventAnalyzer] = None,
+        boundary_analyzer: Optional[BoundaryAnalyzer] = None,
+        position_analyzer: Optional[PositionAnalyzer] = None,
+        window_label_analyzer: Optional[WindowLabelAnalyzer] = None,
         use_vlm: bool = True,
         qwen_model_path: Optional[str] = None,
         yolo_device: str = "cpu",
@@ -172,6 +182,15 @@ class EndToEndRunner:
         self.use_vlm = use_vlm
         self.qwen_model_path = qwen_model_path
         self.event_analyzer = event_analyzer
+        self.boundary_analyzer = boundary_analyzer
+        self.position_analyzer = position_analyzer
+        self.window_label_analyzer = window_label_analyzer
+        self._vlm_model = None
+        self._vlm_processor = None
+        self.vlm_main_calls = 0
+        self.vlm_boundary_calls = 0
+        self.vlm_position_calls = 0
+        self.vlm_window_label_calls = 0
 
         self.buffer_interval = 1.0 / buffer_fps
         self.analysis_interval = 1.0 / analysis_fps
@@ -190,6 +209,8 @@ class EndToEndRunner:
         self._analysis_observation_lock = threading.Lock()
         self._stable_behavior_by_track: dict[int | None, str] = {}
         self._pending_behavior_by_track: dict[int | None, _PendingBehavior] = {}
+        self._boundary_allowed_event_types: list[str] | None = None
+        self._window_label_allowed_event_types: list[str] | None = None
 
         self._is_realtime = is_camera
         self._stop_event = threading.Event()
@@ -200,6 +221,7 @@ class EndToEndRunner:
             return None
         if self.event_analyzer is None:
             model, processor = load_model(model_path=self.qwen_model_path)
+            self._vlm_model, self._vlm_processor = model, processor
 
             def run(event: Event, paths: list[str]):
                 return analyze_event(
@@ -212,6 +234,68 @@ class EndToEndRunner:
 
             self.event_analyzer = run
         return self.event_analyzer
+
+    def _ensure_boundary_analyzer(self) -> Optional[BoundaryAnalyzer]:
+        if not self.use_vlm:
+            return None
+        if self.boundary_analyzer is not None:
+            return self.boundary_analyzer
+        # 自定义主分析器没有暴露模型时，不擅自再次加载大模型；测试或集成方
+        # 可显式传入 boundary_analyzer。正式内置分析器会复用同一模型。
+        self._ensure_event_analyzer()
+        if self._vlm_model is None or self._vlm_processor is None:
+            return None
+        model, processor = self._vlm_model, self._vlm_processor
+
+        def run(paths: list[str]) -> dict[str, Any]:
+            return analyze_frame_labels(
+                model,
+                processor,
+                paths,
+                allowed_event_types=self._boundary_allowed_event_types,
+            )
+
+        self.boundary_analyzer = run
+        return self.boundary_analyzer
+
+    def _ensure_position_analyzer(self) -> Optional[PositionAnalyzer]:
+        if not self.use_vlm:
+            return None
+        if self.position_analyzer is not None:
+            return self.position_analyzer
+        self._ensure_event_analyzer()
+        if self._vlm_model is None or self._vlm_processor is None:
+            return None
+        model, processor = self._vlm_model, self._vlm_processor
+
+        def run(paths: list[str], event_type: str) -> dict[str, Any]:
+            return analyze_position_transition(
+                model, processor, paths, event_type
+            )
+
+        self.position_analyzer = run
+        return self.position_analyzer
+
+    def _ensure_window_label_analyzer(self) -> Optional[WindowLabelAnalyzer]:
+        if not self.use_vlm:
+            return None
+        if self.window_label_analyzer is not None:
+            return self.window_label_analyzer
+        self._ensure_event_analyzer()
+        if self._vlm_model is None or self._vlm_processor is None:
+            return None
+        model, processor = self._vlm_model, self._vlm_processor
+
+        def run(paths: list[str]) -> dict[str, Any]:
+            return analyze_window_label(
+                model,
+                processor,
+                paths,
+                allowed_event_types=self._window_label_allowed_event_types,
+            )
+
+        self.window_label_analyzer = run
+        return self.window_label_analyzer
 
     def _store_buffer_frame(self, video_frame: VideoFrame) -> None:
         if (
@@ -384,6 +468,8 @@ class EndToEndRunner:
             "vlm_description_generic": "按VLM客观描述归为其他行为",
             "unclassified_seated_window": "无具体证据，使用在座窗口兜底",
             "previous_stable_event": "当前窗口无明确分类，延续上一稳定行为",
+            "parse_error_boundary_other": "结构化结果失效且存在边界风险，安全归为其他",
+            "whole_window_visual_review": "整窗单标签视觉复核",
         }
         if fallback in fallback_labels:
             return fallback_labels[fallback]
@@ -394,8 +480,8 @@ class EndToEndRunner:
             for segment in segments
         ):
             return "VLM events=true 且提供了合法时间分段"
-        if meta.get("primary_event") == event_type:
-            return "VLM events=true 且判为主事件"
+        if meta.get("boundary_labels_valid"):
+            return "逐帧单标签边界复核"
         return "VLM确认，且通过事件契约校验"
 
     @staticmethod
@@ -404,6 +490,8 @@ class EndToEndRunner:
         meta: dict[str, Any],
     ) -> bool:
         """判断新事件是否有足以立即推翻历史状态的明确动作证据。"""
+        if meta.get("whole_window_label_valid"):
+            return True
         segments = meta.get("activity_segments", [])
         segmented_types = {
             str(item.get("event_type", ""))
@@ -429,7 +517,9 @@ class EndToEndRunner:
         if event_type == "writing":
             return any(
                 word in description
-                for word in ("落笔", "写字", "书写", "做题", "记笔记", "用笔记录")
+                for word in (
+                    "落笔", "写字", "写作", "书写", "做题", "记笔记", "用笔记录"
+                )
             )
         if event_type == "phone_usage":
             return "手机" in description and any(
@@ -439,12 +529,22 @@ class EndToEndRunner:
         if event_type == "computer_usage":
             return any(word in description for word in ("电脑", "笔记本电脑")) and any(
                 word in description
-                for word in ("使用", "操作", "键盘", "鼠标", "屏幕", "点击", "敲击")
+                for word in (
+                    "使用", "操作", "键盘", "鼠标", "屏幕", "点击", "敲击",
+                    "工作", "用电脑", "用笔记本电脑",
+                )
             )
         if event_type == "communication_distraction":
             return any(word in description for word in ("交谈", "说话", "通话", "与人交流"))
         if event_type == "other_behavior":
-            return description_has_transition_evidence(description)
+            return (
+                description_has_transition_evidence(description)
+                or bool(meta.get("blocks_previous_stable"))
+                or bool(
+                    meta.get("boundary_labels_valid")
+                    and not meta.get("boundary_description_conflict")
+                )
+            )
         return False
 
     @staticmethod
@@ -584,6 +684,42 @@ class EndToEndRunner:
 
         stable = self._stable_behavior_by_track.get(track_key)
         pending = self._pending_behavior_by_track.get(track_key)
+        duration = max(0.0, event.end_time - event.start_time)
+        # finalize 产生的不足 2 秒尾窗必须先判尾部，不能因为标签恰好与
+        # stable 相同就直接保存为完整动作。
+        if event.is_final_window and duration < _SHORT_TAIL_SECONDS:
+            safe_stable_tail = (
+                stable == event_type
+                and not description_has_transition_evidence(
+                    str(meta.get("objective_description", ""))
+                )
+                and not meta.get("blocks_previous_stable")
+                and (
+                    self._has_strong_action_evidence(event_type, meta)
+                    or meta.get("timeline_fallback") == "previous_stable_event"
+                )
+            )
+            if safe_stable_tail:
+                meta = self._with_temporal_context(
+                    meta,
+                    previous_stable=stable,
+                    proposed_event=event_type,
+                    decision="continue_verified_stable_at_short_tail",
+                    accumulated_current_weight=_CURRENT_WINDOW_WEIGHT + _HISTORY_WEIGHT,
+                )
+                self._remember_event(event, paths, meta)
+                return
+            if pending is not None:
+                self._pending_behavior_by_track.pop(track_key, None)
+                self._remember_pending_as_other(
+                    pending,
+                    reason="最终短尾到来前的弱切换仍未确认",
+                )
+            self._remember_pending_as_other(
+                _PendingBehavior(event=event, paths=list(paths), meta=meta),
+                reason="最终窗口不足2秒，先按不完整收尾处理",
+            )
+            return
         if stable is None:
             self._stable_behavior_by_track[track_key] = event_type
             meta = self._with_temporal_context(
@@ -598,7 +734,13 @@ class EndToEndRunner:
 
         if event_type == stable:
             if pending is not None:
-                self._remember_temporally_corrected(pending, stable)
+                if pending.meta.get("blocks_previous_stable"):
+                    self._remember_pending_as_other(
+                        pending,
+                        reason="前窗边界复核失败或明确发生切换，禁止被旧稳定事件覆盖",
+                    )
+                else:
+                    self._remember_temporally_corrected(pending, stable)
                 self._pending_behavior_by_track.pop(track_key, None)
             meta = self._with_temporal_context(
                 meta,
@@ -610,7 +752,6 @@ class EndToEndRunner:
             self._remember_event(event, paths, meta)
             return
 
-        duration = max(0.0, event.end_time - event.start_time)
         strong_evidence = self._has_strong_action_evidence(event_type, meta)
         # 一两秒的尾片段不足以凭一个新标签立即推翻稳定状态。明确的整理
         # 动作例外，因为它正是需要及时切断上一事件的过渡段。
@@ -622,7 +763,12 @@ class EndToEndRunner:
                 pending_description = str(
                     pending.meta.get("objective_description", "")
                 )
-                if (
+                if pending.meta.get("blocks_previous_stable"):
+                    self._remember_pending_as_other(
+                        pending,
+                        reason="前窗已经阻断旧稳定事件，后续具体动作不得倒灌覆盖",
+                    )
+                elif (
                     pending.event.event_type == event_type
                     and description_has_transition_evidence(pending_description)
                     and stable != event_type
@@ -754,6 +900,7 @@ class EndToEndRunner:
                     pending.event.event_type == "other_behavior"
                     or duration <= _SHORT_TAIL_SECONDS
                     or description_has_transition_evidence(description)
+                    or pending.meta.get("blocks_previous_stable")
                 ):
                     self._remember_pending_as_other(
                         pending,
@@ -812,55 +959,364 @@ class EndToEndRunner:
         paths: list[str],
         meta: dict[str, Any] | None = None,
     ) -> bool:
-        """只细分容易混入过渡动作的窗口，避免把所有 VLM 调用翻倍。"""
-        if event.event_type not in _BEHAVIOR_EVENT_TYPES:
+        """主三步判断完成后，判断是否需要一次逐帧边界复核。"""
+        if meta is None:
+            # 禁止在第一次完整 VLM 判断之前因 YOLO 稀疏而机械细分。
             return False
         duration = max(0.0, event.end_time - event.start_time)
-        if duration < 6.0 or len(paths) < 7:
+        if duration <= 0.0 or len(paths) < 2:
             return False
-        if meta is not None:
-            if meta.get("activity_segments"):
-                return False
-            description = str(meta.get("objective_description", ""))
-            if meta.get("parse_error") or description_has_transition_evidence(description):
+        if event.event_type in _TRANSITION_EVENT_TYPES and meta.get(
+            "position_review_valid"
+        ):
+            return False
+        if event.is_final_window and duration < _SHORT_TAIL_SECONDS:
+            # 短尾由时序层整体判断，禁止边界模型把一秒尾巴切成多个伪事件。
+            return False
+        if event.is_final_window or event.event_type in _TRANSITION_EVENT_TYPES:
+            return True
+        # 视频开头直到 12 秒都允许逐帧寻找真正的入座和准备边界。
+        if event.start_time < 12.0:
+            return True
+
+        segments = meta.get("activity_segments", [])
+        if segments:
+            return False
+        description = str(meta.get("objective_description", ""))
+        if description_has_transition_evidence(description) or any(
+            word in description
+            for word in ("先", "随后", "然后", "接着", "转而", "之后")
+        ):
+            return True
+
+        events = meta.get("events", {})
+        true_types = [
+            name for name, value in events.items()
+            if name in ALL_EVENTS and bool(value)
+        ] if isinstance(events, dict) else []
+        if len(true_types) > 1 and not segments:
+            return True
+
+        # 外层 JSON 已损坏时，即使抢救到了完整 event_labels，也只把它当成
+        # 二次视觉复核的候选，不能因 description 恰好同词就跳过复核。
+        if meta.get("parse_error"):
+            described = infer_activity_from_description(description)
+            if described in _BEHAVIOR_EVENT_TYPES or self._object_clues_changed(event):
                 return True
 
-        # candidate_scores 已按全部分析帧计数。低于 50% 且与稳定历史冲突
-        # 时，单个 8 秒标签不可靠，拆成两个约 4 秒的小窗口再判断。
-        support = max(event.candidate_scores.values(), default=0.0)
-        stable = self._stable_behavior_by_track.get(0)
-        conflicts_with_context = stable is None or event.event_type != stable
-        return support < 0.5 and conflicts_with_context
+        # 一个合法 true 且客观动作与之吻合时，主判断已经足够。历史 stable
+        # 不同不能单独触发边界复核，否则一次错误 stable 会污染后续整段视频。
+        if len(true_types) == 1:
+            candidate_conflict = self._candidate_conflicts_with_stable(
+                event, true_types[0]
+            )
+            if candidate_conflict:
+                return True
+            if infer_activity_from_description(description) == true_types[0]:
+                return False
 
-    def _refine_window_halves(
+        stable = self._stable_behavior_by_track.get(0)
+        if len(true_types) == 1 and stable is not None and true_types[0] != stable:
+            return True
+        return False
+
+    @staticmethod
+    def _candidate_conflicts_with_stable(event: Event, stable: str | None) -> bool:
+        """足量的另一物体候选只用于提示切换风险，不直接建立事件。"""
+        if stable not in _BEHAVIOR_EVENT_TYPES or stable == "other_behavior":
+            return False
+        competing = {
+            name: float(score)
+            for name, score in event.candidate_scores.items()
+            if name in _BEHAVIOR_EVENT_TYPES and name != stable
+        }
+        return bool(competing) and max(competing.values()) >= 0.25
+
+    def _object_clues_changed(self, event: Event) -> bool:
+        """用窗口首尾 YOLO 类别变化判断解析失败时是否疑似切换。"""
+        with self._analysis_observation_lock:
+            observations = [
+                item for item in self._analysis_observations
+                if event.start_time <= float(item["timestamp"]) <= event.end_time
+            ]
+        if len(observations) < 2:
+            # 多种候选或一半以上未分类，也属于明显不稳定的弱线索。
+            return len(event.candidate_scores) > 1 or (
+                bool(event.candidate_scores) and event.unclassified_ratio >= 0.5
+            )
+        relevant = {"book", "pen", "laptop", "computer", "keyboard", "mouse", "cell phone", "phone"}
+        def classes(item: dict[str, Any]) -> set[str]:
+            return {
+                str(obj.get("class_name", ""))
+                for obj in item.get("objects", [])
+                if str(obj.get("class_name", "")) in relevant
+            }
+        return classes(observations[0]) != classes(observations[-1])
+
+    def _review_boundary_window(
         self,
         event: Event,
         paths: list[str],
-    ) -> None:
-        midpoint = (event.start_time + event.end_time) / 2.0
-        middle_index = len(paths) // 2
-        halves = (
-            (event.start_time, midpoint, paths[: middle_index + 1]),
-            (midpoint, event.end_time, paths[middle_index:]),
-        )
+        meta: dict[str, Any],
+    ) -> dict[str, Any]:
         print(
-            f"[窗口细分] {event.start_time:.2f}s - {event.end_time:.2f}s | "
-            "物体线索较弱、与上下文冲突或包含整理动作，改用两个短窗口复核"
+            f"[边界复核] {event.start_time:.2f}s - {event.end_time:.2f}s | "
+            "使用同一组关键帧逐帧单标签定位切换"
         )
-        for start_time, end_time, sub_paths in halves:
-            if not sub_paths or end_time <= start_time:
-                continue
-            # 细分窗口不继承原来的单一行为候选，避免错误候选继续锚定 VLM。
-            sub_event = replace(
-                event,
-                event_type="other_behavior",
-                start_time=start_time,
-                end_time=end_time,
-                description="待 VLM 细分复核",
-                candidate_scores={},
-                unclassified_ratio=1.0,
+        result = {**meta, "boundary_review_required": True}
+
+        def boundary_failure_as_other(reason: str) -> dict[str, Any]:
+            safe_events = {name: False for name in ALL_EVENTS}
+            safe_events["other_behavior"] = True
+            result.update({
+                "boundary_review_error": reason,
+                "event_confirmed": True,
+                "events": safe_events,
+                "observed_activities": ["other_behavior"],
+                "activity_segments": [{
+                    "event_type": "other_behavior",
+                    "start_frame": 1,
+                    "end_frame": len(paths),
+                }],
+                "blocks_previous_stable": True,
+                "timeline_fallback": "parse_error_boundary_other",
+            })
+            return result
+
+        stable = self._stable_behavior_by_track.get(0)
+        described = infer_activity_from_description(
+            str(meta.get("objective_description", meta.get("description", "")))
+        )
+        description = str(
+            meta.get("objective_description", meta.get("description", ""))
+        )
+        # 主 JSON 失败、但描述没有明确的先后切换时，不要求 2B 模型一次生成
+        # 九个标签。先用同一组图片做一次更可靠的整窗单标签视觉复核。
+        # description 只决定走哪种复核，不直接产生正式事件。
+        if (
+            meta.get("parse_error")
+            and event.start_time >= 12.0
+            and not description_has_transition_evidence(description)
+            and not any(word in description for word in ("先", "随后", "然后", "接着", "转而", "之后"))
+        ):
+            return self._review_whole_window(event, paths, result)
+        # JSON失败时 description 只能缩小二次视觉复核的候选范围，不能
+        # 直接创建事件。这样既能从 sticky-other 恢复，又不违反解析契约。
+        allowed = set(_BEHAVIOR_EVENT_TYPES)
+        if event.start_time < 12.0:
+            allowed.add("sit_at_study_position")
+        if not meta.get("parse_error") and event.event_type in ALL_EVENTS:
+            allowed.add(event.event_type)
+        if not meta.get("parse_error") and stable in ALL_EVENTS:
+            allowed.add(str(stable))
+        for event_map_name in ("events", "raw_events"):
+            event_map = meta.get(event_map_name, {})
+            if isinstance(event_map, dict):
+                allowed.update(
+                    name for name, enabled in event_map.items()
+                    if name in ALL_EVENTS and bool(enabled)
+                )
+        if described in ALL_EVENTS:
+            allowed.add(str(described))
+        self._boundary_allowed_event_types = [
+            name for name in ALL_EVENTS if name in allowed
+        ]
+        analyzer = self._ensure_boundary_analyzer()
+        if analyzer is None:
+            # 自定义/测试分析器可能没有二次视觉能力；此时保留已经得到的
+            # 主结构结果。正式内置流程始终会复用已加载模型创建复核器。
+            result["boundary_review_error"] = "没有可用的逐帧边界分析器"
+            return result
+        self.vlm_boundary_calls += 1
+        try:
+            boundary = analyzer(paths)
+        except Exception as exc:
+            return boundary_failure_as_other(str(exc))
+        labels = list(boundary.get("frame_labels", []))
+        boundary_segments = list(boundary.get("activity_segments", []))
+        print(
+            f"[边界标签] 允许={self._boundary_allowed_event_types} | "
+            f"输出={labels}"
+        )
+        pathological = (
+            len(set(labels)) > 3
+            or len(boundary_segments) > 3
+            or any(label not in allowed for label in labels)
+        )
+        if pathological:
+            boundary = {
+                **boundary,
+                "valid": False,
+                "parse_error": "边界标签种类/切换次数异常，疑似机械枚举",
+            }
+        if not boundary.get("valid") or not boundary.get("activity_segments"):
+            result["boundary_review_error"] = str(
+                boundary.get("parse_error", "frame_labels 无效")
             )
-            self._handle_event(sub_event, list(sub_paths), allow_refine=False)
+            main_events = meta.get("events", {})
+            main_true = [
+                name for name, enabled in main_events.items()
+                if name in ALL_EVENTS and bool(enabled)
+            ] if isinstance(main_events, dict) else []
+            main_type = main_true[0] if len(main_true) == 1 else None
+            main_matches_description = (
+                main_type is not None
+                and infer_activity_from_description(description) == main_type
+            )
+            main_has_no_conflict = (
+                main_type is not None
+                and not self._candidate_conflicts_with_stable(event, main_type)
+                and not description_has_transition_evidence(description)
+            )
+            if (
+                not meta.get("parse_error")
+                and main_matches_description
+                and main_has_no_conflict
+            ):
+                # 只有主判断、描述和候选证据三者没有冲突时，才允许在边界
+                # 模型格式失败后保留主判断。
+                result["boundary_review_rejected"] = True
+                return result
+            return boundary_failure_as_other(result["boundary_review_error"])
+
+        labels = list(boundary["frame_labels"])
+        segments = list(boundary["activity_segments"])
+        boundary_events = {name: False for name in ALL_EVENTS}
+        for label in labels:
+            boundary_events[str(label)] = True
+        result.update({
+            "event_confirmed": True,
+            "events": boundary_events,
+            "observed_activities": list(dict.fromkeys(labels)),
+            "activity_segments": segments,
+            "frame_labels": labels,
+            "boundary_labels_valid": True,
+            "boundary_vlm_raw": boundary.get("_vlm_raw", ""),
+            "boundary_description_conflict": bool(
+                described in _BEHAVIOR_EVENT_TYPES
+                and labels
+                and str(described) not in labels
+            ),
+        })
+        return result
+
+    def _review_whole_window(
+        self,
+        event: Event,
+        paths: list[str],
+        meta: dict[str, Any],
+    ) -> dict[str, Any]:
+        """以一个短标签复核整窗，避免 2B 模型机械枚举九帧标签。"""
+        result = dict(meta)
+        allowed = [
+            name for name in ALL_EVENTS
+            if name in _BEHAVIOR_EVENT_TYPES
+        ]
+        self._window_label_allowed_event_types = allowed
+        analyzer = self._ensure_window_label_analyzer()
+        if analyzer is None:
+            review: dict[str, Any] = {
+                "valid": False,
+                "parse_error": "没有可用的整窗单标签分析器",
+            }
+        else:
+            self.vlm_window_label_calls += 1
+            print(
+                f"[整窗复核] {event.start_time:.2f}s - {event.end_time:.2f}s | "
+                "主JSON失败，使用单标签视觉判断"
+            )
+            try:
+                review = analyzer(paths)
+            except Exception as exc:
+                review = {"valid": False, "parse_error": str(exc)}
+
+        label = str(review.get("label", ""))
+        if not review.get("valid") or label not in _BEHAVIOR_EVENT_TYPES:
+            label = "other_behavior"
+            result["whole_window_review_error"] = str(
+                review.get("parse_error", "整窗单标签无效")
+            )
+        events = {name: False for name in ALL_EVENTS}
+        events[label] = True
+        result.update({
+            "event_confirmed": True,
+            "events": events,
+            "observed_activities": [label],
+            "activity_segments": [{
+                "event_type": label,
+                "start_frame": 1,
+                "end_frame": len(paths),
+            }],
+            "whole_window_label_valid": bool(review.get("valid")),
+            "whole_window_vlm_raw": review.get("_vlm_raw", ""),
+            "timeline_fallback": (
+                "whole_window_visual_review"
+                if review.get("valid")
+                else "parse_error_boundary_other"
+            ),
+            # 二次结构化复核（包括安全 other）必须结束旧稳定状态，不能再被
+            # A-B-A 桥接改回 reading。
+            "blocks_previous_stable": True,
+        })
+        print(
+            f"[整窗标签] 允许={allowed} | 输出={label} | "
+            f"有效={bool(review.get('valid'))} | "
+            f"原始={str(review.get('_vlm_raw', ''))[:160].replace(chr(10), ' ')}"
+        )
+        return result
+
+    def _review_position_window(
+        self,
+        event: Event,
+        paths: list[str],
+        meta: dict[str, Any],
+    ) -> dict[str, Any]:
+        """独立验证动态入座/离座，不依赖普通 description 措辞。"""
+        current_events = meta.get("events", {})
+        if isinstance(current_events, dict) and current_events.get(event.event_type):
+            return meta
+        analyzer = self._ensure_position_analyzer()
+        if analyzer is None:
+            return meta
+        self.vlm_position_calls += 1
+        print(
+            f"[位置复核] {event.start_time:.2f}s - {event.end_time:.2f}s | "
+            f"候选={event.event_type}"
+        )
+        try:
+            review = analyzer(paths, event.event_type)
+        except Exception as exc:
+            return {**meta, "position_review_error": str(exc)}
+        result = {
+            **meta,
+            "position_review_valid": bool(review.get("valid")),
+            "position_review": review,
+        }
+        if not review.get("valid") or not review.get("confirmed"):
+            return result
+        events = {name: False for name in ALL_EVENTS}
+        events[event.event_type] = True
+        description = (
+            "人物从站立或走近转为在学习位置坐下。"
+            if event.event_type == "sit_at_study_position"
+            else "人物从学习位置起身并离开。"
+        )
+        result.update({
+            "event_confirmed": True,
+            "events": events,
+            "primary_event": event.event_type,
+            "observed_activities": [event.event_type],
+            "activity_segments": [{
+                "event_type": event.event_type,
+                "start_frame": 1,
+                "end_frame": len(paths),
+            }],
+            "objective_description": description,
+            "final_description": description,
+            "description": description,
+            "parse_error": "",
+        })
+        return result
 
     def _handle_event(
         self,
@@ -894,11 +1350,9 @@ class EndToEndRunner:
         )
 
         if analyzer is not None:
-            if allow_refine and self._should_refine_window(event, paths):
-                self._refine_window_halves(event, paths)
-                return
             try:
                 print(f"[VLM请求] 候选={event.event_type} | 关键帧={len(paths)}张")
+                self.vlm_main_calls += 1
                 confirmed_event, meta = analyzer(event, paths)
             except Exception as exc:
                 error = f"VLM 分析 {event.event_type} 失败: {exc}"
@@ -913,9 +1367,34 @@ class EndToEndRunner:
                 )
                 return
 
+            if event.event_type in _TRANSITION_EVENT_TYPES:
+                meta = self._review_position_window(event, paths, meta)
+
             if allow_refine and self._should_refine_window(event, paths, meta):
-                self._refine_window_halves(event, paths)
-                return
+                meta = self._review_boundary_window(event, paths, meta)
+
+            # EventEngine 的位置候选只能由同类动态位置事件确认，不能把
+            # “静态坐着看书”的错误入座窗改存成阅读等行为。
+            if event.event_type in _TRANSITION_EVENT_TYPES:
+                transition = event.event_type
+                filtered_segments = [
+                    item for item in meta.get("activity_segments", [])
+                    if isinstance(item, dict) and item.get("event_type") == transition
+                ]
+                transition_confirmed = bool(
+                    isinstance(meta.get("events"), dict)
+                    and meta["events"].get(transition)
+                )
+                meta = {
+                    **meta,
+                    "events": {
+                        name: bool(name == transition and transition_confirmed)
+                        for name in ALL_EVENTS
+                    },
+                    "activity_segments": filtered_segments,
+                    "observed_activities": [transition] if transition_confirmed else [],
+                    "event_confirmed": transition_confirmed,
+                }
 
             if self.trace:
                 trace_meta = dict(meta)
@@ -935,28 +1414,46 @@ class EndToEndRunner:
                 and event.event_type in _BEHAVIOR_EVENT_TYPES
             ):
                 description = str(meta.get("description", "")).strip()
-                description_activity = infer_activity_from_description(description)
-                candidate_activity = event.event_type
-                if (
-                    description_activity in _BEHAVIOR_EVENT_TYPES
-                    and description_activity != "other_behavior"
-                ):
-                    fallback_activity = description_activity
-                    fallback_source = "vlm_description"
-                elif description_activity == "other_behavior":
-                    fallback_activity = description_activity
-                    fallback_source = "vlm_description_generic"
+                stable_activity = self._stable_behavior_by_track.get(0)
+                boundary_window = bool(meta.get("boundary_review_required"))
+                parse_error = bool(meta.get("parse_error"))
+                transition = description_has_transition_evidence(description)
+                stable_conflict = (
+                    stable_activity in _BEHAVIOR_EVENT_TYPES
+                    and (
+                        description_conflicts_with_event(
+                            description, str(stable_activity)
+                        )
+                        or self._candidate_conflicts_with_stable(
+                            event, str(stable_activity)
+                        )
+                    )
+                )
+                may_extend_stable = (
+                    stable_activity in _BEHAVIOR_EVENT_TYPES
+                    and stable_activity != "other_behavior"
+                    and not boundary_window
+                    and (
+                        not event.is_final_window
+                        or (event.end_time - event.start_time) < _SHORT_TAIL_SECONDS
+                    )
+                    and event.start_time >= 12.0
+                    and not transition
+                    and not stable_conflict
+                    and not self._object_clues_changed(event)
+                )
+                if may_extend_stable:
+                    fallback_activity = str(stable_activity)
+                    fallback_source = "previous_stable_event"
                 else:
-                    stable_activity = self._stable_behavior_by_track.get(0)
-                    if stable_activity in _BEHAVIOR_EVENT_TYPES and stable_activity != "other_behavior":
-                        fallback_activity = stable_activity
-                        fallback_source = "previous_stable_event"
-                    elif candidate_activity != "other_behavior":
-                        fallback_activity = candidate_activity
-                        fallback_source = "event_engine_candidate"
-                    else:
-                        fallback_activity = "other_behavior"
-                        fallback_source = "unclassified_seated_window"
+                    # JSON 失败、边界/整理/新事件/首尾窗口都采用安全的 other；
+                    # 抢救 description 和 EventEngine 物体候选不得制造具体事件。
+                    fallback_activity = "other_behavior"
+                    fallback_source = (
+                        "parse_error_boundary_other"
+                        if parse_error or boundary_window
+                        else "unclassified_seated_window"
+                    )
 
                 if not description or description == "[VLM未返回有效description]":
                     description = "人物仍在学习位置，但未识别出可归入具体类别的动作。"
@@ -984,6 +1481,11 @@ class EndToEndRunner:
                         "end_frame": len(paths),
                     }],
                     "timeline_fallback": fallback_source,
+                    "blocks_previous_stable": bool(
+                        fallback_activity == "other_behavior"
+                        and stable_activity not in (None, "other_behavior")
+                        and (transition or stable_conflict or boundary_window)
+                    ),
                     "contract_warnings": [
                         *meta.get("contract_warnings", []),
                         "结构化事件没有有效行为，已按 "
@@ -1070,7 +1572,6 @@ class EndToEndRunner:
             )
             else None
         )
-        candidate_event_type = event.event_type
         if not activities:
             return []
         duration = max(0.0, event.end_time - event.start_time)
@@ -1089,8 +1590,13 @@ class EndToEndRunner:
                     end_frame = max(start_frame, min(frame_count, int(segment["end_frame"])))
                 except (KeyError, TypeError, ValueError):
                     continue
-                start_time = event.start_time + ((start_frame - 1) / frame_count) * duration
-                end_time = event.start_time + (end_frame / frame_count) * duration
+                denominator = max(1, frame_count - 1)
+                start_time = event.start_time + ((start_frame - 1) / denominator) * duration
+                end_time = (
+                    event.end_time
+                    if end_frame >= frame_count
+                    else event.start_time + (end_frame / denominator) * duration
+                )
                 events.append(
                     Event(
                         event_type=event_type,
@@ -1099,6 +1605,7 @@ class EndToEndRunner:
                         track_id=event.track_id,
                         confidence=event.confidence,
                         description=description,
+                        is_final_window=event.is_final_window,
                     )
                 )
                 represented_types.add(event_type)
@@ -1112,39 +1619,9 @@ class EndToEndRunner:
             if event_type not in represented_types
         ]
 
-        fallback_types: list[str] = []
-
-        def add_fallback(event_type: str | None) -> None:
-            if (
-                isinstance(event_type, str)
-                and event_type in unsegmented
-                and event_type not in fallback_types
-            ):
-                fallback_types.append(event_type)
-
-        candidate_available = candidate_event_type in unsegmented
-        primary_available = primary_activity in unsegmented
-
-        # 明确的位置/生命周期候选已有 EventEngine 时序证据；缺少 segment
-        # 时它优先，不能再把不同的 VLM 主事件铺成同一个完整窗口。
-        if candidate_available and candidate_event_type != "other_behavior":
-            add_fallback(candidate_event_type)
-        else:
-            # 通用 other 只是占位候选，优先采用 VLM 的具体主事件。
-            if (
-                primary_available
-                and (
-                    primary_activity not in _TRANSITION_EVENT_TYPES
-                    or primary_activity == candidate_event_type
-                )
-            ):
-                add_fallback(primary_activity)
-            if not fallback_types:
-                add_fallback(candidate_event_type)
-
-        # 兼容只返回一个明确普通事件、但漏写 primary/segment 的小模型输出。
-        if len(activities) == 1 and activities[0] not in _TRANSITION_EVENT_TYPES:
-            add_fallback(activities[0])
+        # primary_event 只作摘要。无分段时只有唯一事件可以铺满整窗；
+        # 多事件必须由逐帧复核或 activity_segments 给出实际边界。
+        fallback_types = unsegmented if len(activities) == 1 else []
 
         if self.trace:
             dropped_unsegmented = [
@@ -1167,6 +1644,7 @@ class EndToEndRunner:
                     track_id=event.track_id,
                     confidence=event.confidence,
                     description=description,
+                    is_final_window=event.is_final_window,
                 )
             )
         return events
@@ -1415,6 +1893,18 @@ class EndToEndRunner:
 
         return {
             "stream": stats,
+            "vlm_calls": {
+                "main": self.vlm_main_calls,
+                "boundary": self.vlm_boundary_calls,
+                "position": self.vlm_position_calls,
+                "window_label": self.vlm_window_label_calls,
+                "total": (
+                    self.vlm_main_calls
+                    + self.vlm_boundary_calls
+                    + self.vlm_position_calls
+                    + self.vlm_window_label_calls
+                ),
+            },
             "events_detected": len(self.events) + len(self.rejected_events),
             "memories_saved": len(self.memory_store),
             "events": [asdict(event) for event in self.events],

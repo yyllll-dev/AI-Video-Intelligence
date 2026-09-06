@@ -1,13 +1,22 @@
 import json
+import pytest
+import src.vlm.inference as vlm_inference
 
 from src.event.event_types import ALL_EVENTS
 from src.vlm.inference import (
+    frame_labels_to_segments,
+    analyze_window_label,
     infer_activity_from_description,
     infer_activities_from_vlm_meta,
     normalize_vlm_result,
     parse_json,
 )
-from src.vlm.prompt import build_activity_prompt, build_caption_prompt
+from src.vlm.prompt import (
+    build_activity_prompt,
+    build_caption_prompt,
+    build_frame_labels_prompt,
+    build_window_label_prompt,
+)
 
 
 def _events(**confirmed):
@@ -44,11 +53,110 @@ def test_prompt_uses_only_the_eight_root_event_types():
         assert removed not in prompt
 
 
+def test_window_label_prompt_distinguishes_laptop_from_book_and_writing():
+    prompt = build_window_label_prompt()
+    assert "不要 JSON" in prompt
+    assert "笔记本电脑" in prompt
+    assert "不是书" in prompt
+    assert "笔尖接触纸面" in prompt
+    assert "前后动作不一致" in prompt
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("computer_usage", "computer_usage"),
+        ('"writing"', "writing"),
+        ("label: reading", "reading"),
+    ],
+)
+def test_window_label_accepts_strict_bare_enum(monkeypatch, raw, expected):
+    monkeypatch.setattr(vlm_inference, "run_vlm", lambda **kwargs: raw)
+    result = analyze_window_label(object(), object(), ["one.jpg"])
+    assert result["valid"] is True
+    assert result["label"] == expected
+
+
+def test_parser_salvages_only_complete_structured_event_labels():
+    result = parse_json(
+        '{"objective_description":"人物使用笔记本电脑",'
+        '"event_labels":["computer_usage"],"activity_segments":['
+    )
+    assert result["_parse_error"]
+    assert result["_structured_event_labels_salvaged"] is True
+    assert result["event_labels"] == ["computer_usage"]
+
+
+def test_parser_does_not_salvage_incomplete_event_labels():
+    result = parse_json(
+        '{"objective_description":"人物写字", "event_labels":["writing"'
+    )
+    assert result["_parse_error"]
+    assert result["_structured_event_labels_salvaged"] is False
+    assert result["event_labels"] == []
+
+
 def test_caption_prompt_routes_to_the_same_three_stage_contract():
     prompt = build_caption_prompt("writing")
     assert "第一步 objective_description" in prompt
     assert "第二步 events" in prompt
-    assert "第三步 final_description" in prompt
+    assert "第三步 activity_segments" in prompt
+    assert "禁止描述性别、年龄、外貌、眼镜、服装、颜色、背景" in prompt
+
+
+def test_boundary_prompt_only_exposes_plausible_labels():
+    prompt = build_frame_labels_prompt(
+        9, ["reading", "other_behavior", "computer_usage"]
+    )
+    assert "reading, other_behavior, computer_usage" in prompt
+    assert "phone_usage" not in prompt
+    assert "不要按标签列表顺序轮流填写" in prompt
+
+
+def test_normalization_removes_irrelevant_visual_details():
+    result = normalize_vlm_result(
+        {
+            "objective_description": (
+                "一位戴眼镜的女性穿着白色衣服，坐在火车车厢内，随后专注写字。"
+            ),
+            "events": _events(writing=True),
+            "primary_event": "writing",
+            "activity_segments": [],
+        },
+        "writing",
+        frame_count=9,
+    )
+    description = result["objective_description"]
+    assert "写字" in description
+    for irrelevant in ("女性", "眼镜", "白色", "衣服", "火车"):
+        assert irrelevant not in description
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "人物用笔记本电脑工作。",
+        "人物在笔记本电脑上工作。",
+        "人物用电脑处理任务。",
+    ],
+)
+def test_laptop_work_phrases_are_computer_usage(description):
+    assert infer_activity_from_description(description) == "computer_usage"
+
+
+def test_compact_event_labels_schema_normalizes_to_eight_event_contract():
+    result = normalize_vlm_result(
+        {
+            "objective_description": "人物使用笔记本电脑工作。",
+            "event_labels": ["computer_usage"],
+            "primary_event": "computer_usage",
+            "activity_segments": [],
+        },
+        "other_behavior",
+        frame_count=9,
+    )
+    assert result["events"]["computer_usage"] is True
+    assert sum(result["events"].values()) == 1
 
 
 def test_other_candidate_is_presented_as_unclassified_not_confirmed():
@@ -85,7 +193,7 @@ def test_explicit_computer_description_repairs_empty_structured_events():
     assert "events 与 objective_description 不一致" in "；".join(result["contract_warnings"])
 
 
-def test_concrete_event_excludes_unsegmented_other():
+def test_unsegmented_other_and_concrete_remain_ambiguous_for_boundary_review():
     result = normalize_vlm_result(
         {
             "objective_description": "人物正在写字。",
@@ -97,7 +205,7 @@ def test_concrete_event_excludes_unsegmented_other():
         frame_count=9,
     )
     assert result["events"]["writing"] is True
-    assert result["events"]["other_behavior"] is False
+    assert result["events"]["other_behavior"] is True
 
 
 def test_other_can_coexist_with_reading_in_separate_segments():
@@ -251,3 +359,52 @@ def test_truncated_json_salvages_objective_description():
     parsed = parse_json('{"objective_description":"人物正在阅读一本书。","events":{')
     assert "阅读一本书" in parsed["objective_description"]
     assert parsed["events"] == {}
+
+
+def test_static_seated_description_cannot_confirm_sit_transition():
+    result = normalize_vlm_result(
+        {
+            "objective_description": "一个人坐在桌前看书。",
+            "events": _events(sit_at_study_position=True),
+            "primary_event": "sit_at_study_position",
+        },
+        event_type="sit_at_study_position",
+        frame_count=9,
+    )
+    assert result["events"]["sit_at_study_position"] is False
+    assert result["primary_event"] == "none"
+
+
+def test_standing_to_sitting_confirms_sit_without_primary_event():
+    result = normalize_vlm_result(
+        {
+            "objective_description": "人物先站着走近书桌，随后坐下。",
+            "events": _events(sit_at_study_position=True),
+            "primary_event": "none",
+        },
+        event_type="sit_at_study_position",
+        frame_count=9,
+    )
+    assert result["events"]["sit_at_study_position"] is True
+
+
+@pytest.mark.parametrize("event_type,word", [("reading", "看书"), ("writing", "写字")])
+def test_parse_error_description_never_manufactures_concrete_event(event_type, word):
+    parsed = parse_json(f'{{"objective_description":"人物正在{word}。","events":{{')
+    result = normalize_vlm_result(parsed, event_type="other_behavior", frame_count=9)
+    assert result["parse_error"]
+    assert not any(result["events"].values())
+    assert result["primary_event"] == "none"
+
+
+def test_frame_labels_are_merged_into_continuous_segments():
+    labels = [
+        "computer_usage", "computer_usage", "other_behavior",
+        "other_behavior", "other_behavior", "writing", "writing",
+        "writing", "writing",
+    ]
+    assert frame_labels_to_segments(labels, 9) == [
+        {"event_type": "computer_usage", "start_frame": 1, "end_frame": 2},
+        {"event_type": "other_behavior", "start_frame": 3, "end_frame": 5},
+        {"event_type": "writing", "start_frame": 6, "end_frame": 9},
+    ]

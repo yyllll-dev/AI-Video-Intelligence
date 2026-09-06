@@ -15,6 +15,7 @@
 
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 # 确保项目根目录和 demo/ 都能被直接运行的脚本导入
@@ -41,6 +42,8 @@ from core import (
     event_label,
     class_label,
 )
+from core.ui_state import load_ui_state, save_ui_state
+from core.utf8_tee import configure_utf8_tee
 
 # ============ SVG 图标（Lucide 风格，内联 stroke 图标） ============
 
@@ -70,18 +73,19 @@ def icon(name: str, size: int = 18, color: str = "currentColor") -> str:
 
 CSS = """
 :root {
-  --brand: #2563eb;
-  --brand-strong: #1d4ed8;
-  --brand-soft: #eff6ff;
-  --ink: #0f172a;
-  --muted: #64748b;
-  --border: #e2e8f0;
-  --page: #f7f9fc;
-  --card: #ffffff;
+  --alm-brand: #2563eb;
+  --alm-brand-strong: #1d4ed8;
+  --alm-brand-soft: #eff6ff;
+  --alm-ink: #0f172a;
+  --alm-muted: #475569;
+  --alm-border: #cbd5e1;
+  --alm-page: #f7f9fc;
+  --alm-card: #ffffff;
 }
 
 .gradio-container {
-  background: var(--page) !important;
+  background: var(--alm-page) !important;
+  color: var(--alm-ink) !important;
   max-width: 1240px !important;
   padding: 28px 32px !important;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
@@ -92,7 +96,7 @@ CSS = """
 .app-header {
   display: flex; align-items: center; gap: 14px;
   padding-bottom: 20px; margin-bottom: 6px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--alm-border);
 }
 .app-logo {
   width: 44px; height: 44px; border-radius: 12px;
@@ -100,22 +104,22 @@ CSS = """
   color: #fff; display: flex; align-items: center; justify-content: center;
   box-shadow: 0 4px 14px rgba(37, 99, 235, .28);
 }
-.app-title { font-size: 22px; font-weight: 700; color: var(--ink); letter-spacing: .2px; }
-.app-subtitle { font-size: 13px; color: var(--muted); margin-top: 2px; }
+.app-title { font-size: 22px; font-weight: 700; color: var(--alm-ink) !important; letter-spacing: .2px; }
+.app-subtitle { font-size: 13px; color: var(--alm-muted) !important; margin-top: 2px; }
 
 /* 区标题 */
 .section-title {
   display: flex; align-items: center; gap: 9px;
-  font-size: 15px; font-weight: 600; color: var(--ink);
+  font-size: 15px; font-weight: 600; color: var(--alm-ink) !important;
   margin: 22px 0 10px;
 }
-.section-title .bar { width: 3px; height: 16px; border-radius: 2px; background: var(--brand); }
-.section-title svg { color: var(--brand); flex-shrink: 0; }
+.section-title .bar { width: 3px; height: 16px; border-radius: 2px; background: var(--alm-brand); }
+.section-title svg { color: var(--alm-brand); flex-shrink: 0; }
 
 /* 卡片 */
 .card {
-  background: var(--card);
-  border: 1px solid var(--border);
+  background: var(--alm-card);
+  border: 1px solid var(--alm-border);
   border-radius: 12px;
   padding: 16px;
   box-shadow: 0 1px 2px rgba(15, 23, 42, .04);
@@ -123,87 +127,89 @@ CSS = """
 
 /* 当前事件卡片 */
 .event-card {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--brand);
+  background: var(--alm-card);
+  border: 1px solid var(--alm-border);
+  border-left: 3px solid var(--alm-brand);
   border-radius: 10px;
   padding: 14px;
 }
-.event-name { font-size: 16px; font-weight: 700; color: var(--ink); }
-.event-meta { color: var(--muted); font-size: 13px; margin-top: 4px; }
-.event-time { color: var(--ink); font-size: 13px; margin-top: 8px;
+.event-name { font-size: 16px; font-weight: 700; color: var(--alm-ink) !important; }
+.event-meta { color: var(--alm-muted) !important; font-size: 13px; margin-top: 4px; }
+.event-time { color: var(--alm-ink) !important; font-size: 13px; margin-top: 8px;
               font-variant-numeric: tabular-nums; }
 
 /* 历史事件记录列表 */
 .timeline { padding: 2px 0; }
 .timeline-item { display: flex; align-items: flex-start; gap: 9px;
-                 padding: 6px 0; font-size: 13px; color: var(--ink); }
+                 padding: 6px 0; font-size: 13px; color: var(--alm-ink) !important; }
 .timeline-dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; flex-shrink: 0; }
-.timeline-dot.current { background: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft); }
+.timeline-dot.current { background: var(--alm-brand); box-shadow: 0 0 0 3px var(--alm-brand-soft); }
 .timeline-dot.past { background: #cbd5e1; }
-.timeline-time { font-variant-numeric: tabular-nums; color: var(--muted); }
-.timeline-label { color: var(--ink); }
-.timeline-tag { font-size: 11px; color: var(--brand); margin-left: 4px; }
+.timeline-time { font-variant-numeric: tabular-nums; color: var(--alm-muted) !important; }
+.timeline-label { color: var(--alm-ink) !important; }
+.timeline-tag { font-size: 11px; color: var(--alm-brand); margin-left: 4px; }
+.timeline-content { display: flex; flex-direction: column; gap: 3px; }
+.timeline-caption { color: var(--alm-muted) !important; font-size: 12px; line-height: 1.5; }
 
 /* 状态 */
 .status-line { display: flex; align-items: center; gap: 8px;
-               font-size: 13px; color: var(--muted); margin: 10px 2px 2px; }
+               font-size: 13px; color: var(--alm-muted) !important; margin: 10px 2px 2px; }
 .status-dot { width: 9px; height: 9px; border-radius: 50%; }
 .status-dot.idle { background: #cbd5e1; }
 .status-dot.run { background: #22c55e; box-shadow: 0 0 0 3px rgba(34, 197, 94, .2); }
 .status-dot.stop { background: #94a3b8; }
 
 /* AI Analysis 卡片内部 */
-.analysis-section { font-size: 12px; font-weight: 600; color: var(--muted);
+.analysis-section { font-size: 12px; font-weight: 600; color: var(--alm-muted) !important;
                     letter-spacing: .4px; margin-top: 10px; }
 .analysis-section:first-child { margin-top: 0; }
-.analysis-detect { font-size: 13px; color: var(--ink); margin-top: 6px;
+.analysis-detect { font-size: 13px; color: var(--alm-ink) !important; margin-top: 6px;
                    font-variant-numeric: tabular-nums; }
-.analysis-caption { font-size: 14px; color: var(--ink); margin-top: 6px; line-height: 1.6; }
+.analysis-caption { font-size: 14px; color: var(--alm-ink) !important; margin-top: 6px; line-height: 1.6; }
 .badge { display: inline-block; font-size: 10px; font-weight: 600; border-radius: 4px;
          padding: 1px 6px; margin-left: 6px; vertical-align: 1px; }
-.badge.live { background: var(--brand-soft); color: var(--brand); }
-.badge.trigger { background: #f1f5f9; color: var(--muted); }
+.badge.live { background: var(--alm-brand-soft); color: var(--alm-brand); }
+.badge.trigger { background: #f1f5f9; color: var(--alm-muted); }
 
 /* 按钮 */
 button.btn-primary {
-  background: var(--brand) !important;
-  border: 1px solid var(--brand) !important;
+  background: var(--alm-brand) !important;
+  border: 1px solid var(--alm-brand) !important;
   color: #fff !important;
   border-radius: 8px !important;
   font-weight: 600 !important;
 }
-button.btn-primary:hover { background: var(--brand-strong) !important; }
+button.btn-primary:hover { background: var(--alm-brand-strong) !important; }
 button.btn-secondary {
   background: #fff !important;
-  border: 1px solid var(--brand) !important;
-  color: var(--brand) !important;
+  border: 1px solid var(--alm-brand) !important;
+  color: var(--alm-brand) !important;
   border-radius: 8px !important;
   font-weight: 600 !important;
 }
-button.btn-secondary:hover { background: var(--brand-soft) !important; }
+button.btn-secondary:hover { background: var(--alm-brand-soft) !important; }
 
 /* 结果表格表头 */
-.table-wrap th { background: var(--brand-soft) !important; color: var(--brand-strong) !important; }
+.table-wrap th { background: var(--alm-brand-soft) !important; color: var(--alm-brand-strong) !important; }
 
 /* 提示文案 */
-.hint { font-size: 12px; color: var(--muted); margin: -2px 0 10px 2px; }
+.hint { font-size: 12px; color: var(--alm-muted) !important; margin: -2px 0 10px 2px; }
 
 .panel-card {
-  background: #fff; border: 1px solid var(--border); border-radius: 16px;
+  background: #fff; border: 1px solid var(--alm-border); border-radius: 16px;
   padding: 18px !important; box-shadow: 0 8px 28px rgba(15, 23, 42, .06);
 }
 .step-kicker {
-  display: inline-flex; align-items: center; gap: 7px; color: var(--brand);
+  display: inline-flex; align-items: center; gap: 7px; color: var(--alm-brand);
   font-size: 12px; font-weight: 700; letter-spacing: .5px; margin-bottom: 4px;
 }
-.step-title { color: var(--ink); font-size: 18px; font-weight: 700; margin-bottom: 4px; }
-.step-desc { color: var(--muted); font-size: 13px; line-height: 1.6; margin-bottom: 14px; }
+.step-title { color: var(--alm-ink) !important; font-size: 18px; font-weight: 700; margin-bottom: 4px; }
+.step-desc { color: var(--alm-muted) !important; font-size: 13px; line-height: 1.6; margin-bottom: 14px; }
 .memory-guide {
-  padding: 13px 15px; border-radius: 10px; background: var(--brand-soft);
+  padding: 13px 15px; border-radius: 10px; background: var(--alm-brand-soft);
   color: #1e40af; font-size: 13px; line-height: 1.6; margin-bottom: 12px;
 }
-.empty-note { color: var(--muted); font-size: 13px; padding: 14px 0; }
+.empty-note { color: var(--alm-muted) !important; font-size: 13px; padding: 14px 0; }
 """
 
 
@@ -269,6 +275,7 @@ def analysis_html() -> str:
 RESULT_HEADERS = ["时间戳", "事件", "描述", "回放视频"]
 
 _runtime_runner = None
+UI_STATE_PATH = Path(PROJECT_ROOT) / "data" / "ui_state.json"
 
 
 # ============ 回调（后续接 A/D 真实模块） ============
@@ -324,6 +331,74 @@ def on_video_upload(video_path):
         return video_path
 
 
+def _persist_ui_state(state: str, **values) -> None:
+    save_ui_state(
+        UI_STATE_PATH,
+        {
+            "state": state,
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+            **values,
+        },
+    )
+
+
+def on_restore():
+    """页面刷新或点击恢复按钮时，恢复最近一次分析状态。"""
+    saved = load_ui_state(UI_STATE_PATH)
+    unchanged = gr.update()
+    if not saved:
+        return (unchanged,) * 7
+
+    video_path = saved.get("video_path")
+    video_update = (
+        gr.update(value=video_path)
+        if isinstance(video_path, str) and Path(video_path).is_file()
+        else unchanged
+    )
+    state = saved.get("state")
+    if state == "completed":
+        ready = bool(saved.get("ready"))
+        return (
+            saved.get("status_html", status_html("stop")),
+            saved.get("analysis_html", analysis_html()),
+            saved.get("current_event_html", current_event_html()),
+            saved.get("timeline_html", timeline_html()),
+            gr.update(
+                interactive=ready,
+                placeholder=(
+                    "例如：刚才什么时候阅读了？"
+                    if ready else "最近一次分析没有产生可检索事件"
+                ),
+            ),
+            gr.update(interactive=ready),
+            video_update,
+        )
+    if state == "running":
+        running_analysis = (
+            '<div class="card">'
+            '<div class="analysis-section">分析状态<span class="badge live">RUNNING</span></div>'
+            '<div class="analysis-caption">后端仍在分析最近上传的视频。完成后再次点击“恢复最近结果”即可显示。</div>'
+            '</div>'
+        )
+        return (
+            status_html("run"), running_analysis, current_event_html(),
+            timeline_html(), gr.update(interactive=False),
+            gr.update(interactive=False), video_update,
+        )
+    if state == "error":
+        message = str(saved.get("message", "最近一次分析失败"))
+        error_analysis = (
+            '<div class="card"><div class="analysis-section">分析失败</div>'
+            f'<div class="analysis-caption">{message}</div></div>'
+        )
+        return (
+            status_html("stop"), error_analysis, current_event_html(),
+            timeline_html(), gr.update(interactive=False),
+            gr.update(interactive=False), video_update,
+        )
+    return (unchanged,) * 7
+
+
 def on_start(input_mode, video_path, camera_seconds):
     global _runtime_runner
     if input_mode == "上传视频" and not video_path:
@@ -335,15 +410,29 @@ def on_start(input_mode, video_path, camera_seconds):
 
     gr.Info("正在运行完整分析，首次加载 Qwen2-VL 需要一些时间")
     source = 0 if input_mode == "本机摄像头" else str(video_path)
+    _persist_ui_state(
+        "running",
+        input_mode=input_mode,
+        video_path=(str(video_path) if video_path else None),
+    )
     _runtime_runner = EndToEndRunner(
         source=source,
         qwen_model_path=os.getenv("QWEN_VL_MODEL_PATH"),
         yolo_device=os.getenv("YOLO_DEVICE", "cpu"),
         yolo_confidence=float(os.getenv("YOLO_CONFIDENCE", "0.35")),
     )
-    result = _runtime_runner.run(
-        max_duration=float(camera_seconds) if input_mode == "本机摄像头" else None
-    )
+    try:
+        result = _runtime_runner.run(
+            max_duration=float(camera_seconds) if input_mode == "本机摄像头" else None
+        )
+    except Exception as exc:
+        _persist_ui_state(
+            "error",
+            input_mode=input_mode,
+            video_path=(str(video_path) if video_path else None),
+            message=str(exc),
+        )
+        raise
     records = merge_events_for_display(_runtime_runner.memory_store.list_all())
     for record in records:
         if record["merged_event_count"] > 1:
@@ -371,8 +460,11 @@ def on_start(input_mode, video_path, camera_seconds):
         rows = [
             '<div class="timeline-item">'
             '<span class="timeline-dot past"></span>'
-            f'<span class="timeline-time">{record["start_time"]:.2f}s - {record["end_time"]:.2f}s</span>'
-            f'<span class="timeline-label">{event_label(record["event_type"])}</span>'
+            '<span class="timeline-content">'
+            f'<span><span class="timeline-time">{record["start_time"]:.2f}s - {record["end_time"]:.2f}s</span> '
+            f'<span class="timeline-label">{event_label(record["event_type"])}</span></span>'
+            f'<span class="timeline-caption">{record["caption"]}</span>'
+            '</span>'
             '</div>'
             for record in records
         ]
@@ -394,8 +486,24 @@ def on_start(input_mode, video_path, camera_seconds):
         '</div>'
     )
     ready = bool(records)
+    completed_status = status_html("stop")
+    _persist_ui_state(
+        "completed",
+        input_mode=input_mode,
+        video_path=(str(video_path) if video_path else None),
+        ready=ready,
+        status_html=completed_status,
+        analysis_html=analysis,
+        current_event_html=current,
+        timeline_html=timeline,
+    )
+    print(
+        f"[分析完成] 处理 {int(result['stream']['frames'])} 帧 | "
+        f"写入 {result['memories_saved']} 条记忆 | "
+        f"错误 {len(result['errors'])} 个 | 页面状态已保存到 {UI_STATE_PATH}"
+    )
     return (
-        status_html("stop"), analysis, current, timeline,
+        completed_status, analysis, current, timeline,
         gr.update(
             interactive=ready,
             placeholder=(
@@ -426,7 +534,6 @@ def on_input_mode_change(mode: str):
 
 def build_ui() -> gr.Blocks:
     with gr.Blocks(title="AI 学习记忆") as demo:
-        gr.HTML("<style>" + CSS + "</style>")
         gr.HTML(app_header())
 
         with gr.Row():
@@ -456,6 +563,9 @@ def build_ui() -> gr.Blocks:
                         "开始分析", variant="primary", elem_classes=["btn-primary"]
                     )
                     stop_btn = gr.Button("停止", elem_classes=["btn-secondary"])
+                restore_btn = gr.Button(
+                    "恢复最近结果", elem_classes=["btn-secondary"]
+                )
                 status = gr.HTML(status_html("idle"))
 
             with gr.Column(scale=2, elem_classes=["panel-card"]):
@@ -535,11 +645,21 @@ def build_ui() -> gr.Blocks:
         query.submit(on_search, inputs=query, outputs=[results, replay_btn])
         results.select(on_select, outputs=selected_row)
         replay_btn.click(on_replay, inputs=selected_row, outputs=replay_video)
+        restore_outputs = [
+            status, analysis_panel, current_event_panel, timeline_panel,
+            query, search_btn, video_input,
+        ]
+        restore_btn.click(on_restore, outputs=restore_outputs)
+        demo.load(on_restore, outputs=restore_outputs)
 
     return demo
 
 
 if __name__ == "__main__":
+    configure_utf8_tee(Path(PROJECT_ROOT) / "result.txt")
+    print("[日志] 终端输出同步写入 UTF-8 result.txt")
     build_ui().launch(
         allowed_paths=[str(Path(PROJECT_ROOT) / "data")],
+        css=CSS,
+        theme=gr.themes.Soft(primary_hue="blue", neutral_hue="slate"),
     )

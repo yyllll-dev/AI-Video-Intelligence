@@ -29,3 +29,6 @@ class Event:
     candidate_scores: Dict[str, float] = field(default_factory=dict)
     # 没有提供具体物体候选的分析帧比例，仅用于诊断，不是“其他”的票数。
     unclassified_ratio: float = 0.0
+    # 由 EventEngine.finalize() 关闭的最后一个窗口。Runtime 必须先执行
+    # 尾窗口规则，再考虑与上一稳定行为合并。
+    is_final_window: bool = False

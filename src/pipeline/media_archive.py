@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import os
 import shutil
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -72,6 +73,48 @@ class _RelocatingWriter:
             shutil.move(str(self._temporary_path), str(self._target_path))
 
 
+class _FfmpegWriter:
+    """OpenCV 缺少 avc1 编码器时，用随 Python 提供的 FFmpeg 写 H.264。"""
+
+    def __init__(self, path: Path, fps: float, width: int, height: int) -> None:
+        try:
+            import imageio_ffmpeg
+        except ImportError as exc:
+            raise RuntimeError(
+                "OpenCV 不支持 avc1，且未安装 imageio-ffmpeg 备用编码器"
+            ) from exc
+        path.parent.mkdir(parents=True, exist_ok=True)
+        command = [
+            imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-f", "rawvideo",
+            "-pix_fmt", "bgr24", "-s", f"{width}x{height}",
+            "-r", str(max(float(fps), 1.0)), "-i", "-", "-an",
+            "-vcodec", "libx264", "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart", str(path),
+        ]
+        self._process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def isOpened(self) -> bool:
+        return self._process.poll() is None and self._process.stdin is not None
+
+    def write(self, frame: np.ndarray) -> None:
+        if self._process.stdin is None:
+            raise RuntimeError("FFmpeg writer 已关闭")
+        self._process.stdin.write(_even_size(frame).tobytes())
+
+    def release(self) -> None:
+        if self._process.stdin is not None:
+            self._process.stdin.close()
+            self._process.stdin = None
+        return_code = self._process.wait()
+        if return_code != 0:
+            raise RuntimeError("FFmpeg H.264 编码失败")
+
+
 def _open_browser_writer(path: Path, fps: float, frame: np.ndarray):
     frame = _even_size(frame)
     height, width = frame.shape[:2]
@@ -94,9 +137,7 @@ def _open_browser_writer(path: Path, fps: float, frame: np.ndarray):
             return _RelocatingWriter(writer, temporary_path, path)
     if not writer.isOpened():
         writer.release()
-        raise RuntimeError(
-            "无法创建浏览器可播放的 H.264 视频，请确认当前 OpenCV 支持 avc1 编码"
-        )
+        return _FfmpegWriter(path, fps, width, height)
     return writer
 
 
