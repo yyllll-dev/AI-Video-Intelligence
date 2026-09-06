@@ -63,6 +63,14 @@ def main():
     print(f"处理帧数: {int(result['stream']['frames'])}")
     print(f"检测事件: {result['events_detected']}")
     print(f"写入记忆: {result['memories_saved']}")
+    print(
+        "VLM调用: "
+        f"主判断{result['vlm_calls']['main']}次，"
+        f"边界复核{result['vlm_calls']['boundary']}次，"
+        f"整窗复核{result['vlm_calls'].get('window_label', 0)}次，"
+        f"位置复核{result['vlm_calls'].get('position', 0)}次，"
+        f"合计{result['vlm_calls']['total']}次"
+    )
     print(f"错误数量: {len(result['errors'])}")
     print(f"结果文件: {report_path}")
 
