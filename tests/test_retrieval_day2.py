@@ -115,3 +115,21 @@ def test_invalid_embedder_output_is_rejected_before_storage():
     with pytest.raises(ValueError, match="向量维度错误"):
         service.remember_event(Event("reading", 0.0, 1.0, 1, 0.9, "阅读"))
     assert len(store) == 0
+
+
+def test_explicit_event_query_only_returns_that_event_type():
+    service = VideoMemoryService(InMemoryStore(), HashingEmbedder())
+    service.remember_event(Event("writing", 0.0, 8.0, 1, 0.9, "人物正在写字。"))
+    service.remember_event(Event("reading", 8.0, 16.0, 1, 0.9, "人物正在看书。"))
+
+    results = service.search("什么时候阅读了？", top_k=50)
+
+    assert results
+    assert {result.record.event_type for result in results} == {"reading"}
+
+
+def test_explicit_event_query_returns_empty_when_event_did_not_happen():
+    service = VideoMemoryService(InMemoryStore(), HashingEmbedder())
+    service.remember_event(Event("writing", 0.0, 8.0, 1, 0.9, "人物正在写字。"))
+
+    assert service.search("什么时候阅读了？", top_k=50) == []

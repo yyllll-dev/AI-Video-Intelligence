@@ -59,7 +59,11 @@ from .qwen_vlm import load_model
 from .prompt import (
     build_activity_prompt,
     build_frame_labels_prompt,
+    build_first_transition_frame_prompt,
+    build_transition_presence_prompt,
     build_position_transition_prompt,
+    build_position_endpoint_prompt,
+    build_video_summary_prompt,
     build_window_label_prompt,
     EVENT_TYPES,
     EVENT_TYPE_CN,
@@ -265,6 +269,55 @@ def run_vlm(
         return ""
 
     return output_text[0].strip()
+
+
+def run_text_vlm(
+    model,
+    processor,
+    prompt: str,
+    *,
+    max_new_tokens: int = 320,
+) -> str:
+    """复用已加载的 Qwen2-VL 文本能力生成全事件总结。"""
+    prompt = str(prompt).strip()
+    if not prompt:
+        raise ValueError("prompt 不能为空")
+    messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+    text = processor.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    inputs = processor(text=[text], padding=True, return_tensors="pt").to(model.device)
+    generated_ids = model.generate(
+        **inputs,
+        max_new_tokens=int(max_new_tokens),
+        do_sample=False,
+        repetition_penalty=1.10,
+        temperature=None,
+        top_p=None,
+        top_k=None,
+        num_beams=1,
+    )
+    generated_ids_trimmed = [
+        out_ids[len(in_ids):]
+        for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+    ]
+    output = processor.batch_decode(
+        generated_ids_trimmed,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )
+    return output[0].strip() if output else ""
+
+
+def analyze_video_summary(
+    model,
+    processor,
+    records: list[dict[str, Any]],
+) -> str:
+    """让同一个已加载的千问模型综合完整事件时间线。"""
+    return run_text_vlm(model, processor, build_video_summary_prompt(records))
 
 
 # ============================================================
@@ -705,7 +758,11 @@ EVENT_CONTENT_KEYWORDS: dict[str, list[str]] = {
         "看着电脑屏幕", "注视电脑屏幕", "操作键盘", "操作鼠标",
         "看电脑", "点击电脑", "敲键盘", "使用键盘", "使用鼠标",
     ],
-    "communication_distraction": ["说话", "通话", "讨论"],
+    "communication_distraction": [
+        "说话", "交谈", "交流", "对话", "通话", "讨论", "回应",
+        "相互交谈", "面向另一人", "朝向彼此", "与他人交流",
+        "眼神交流", "倾听", "轮流交流", "轮流互动",
+    ],
     "other_behavior": [
         "整理", "收拾", "摆放", "归位", "拿出书", "取出书", "收起书",
         "收好书", "拿起书", "放下书", "将书放", "打开书", "翻到", "寻找页码", "拿出笔袋", "打开笔袋",
@@ -1585,6 +1642,93 @@ def analyze_window_label(
     }
 
 
+def analyze_first_transition_frame(
+    model,
+    processor,
+    frame_paths: list[str],
+    from_event_type: str,
+    to_event_type: str,
+) -> dict[str, Any]:
+    """只要求一个帧号，用于定位 other→具体行为的首次稳定边界。"""
+    if len(frame_paths) < 2:
+        raise ValueError("frame_paths 至少需要 2 张")
+    raw_output = run_vlm(
+        model=model,
+        processor=processor,
+        image_paths=frame_paths,
+        prompt=build_first_transition_frame_prompt(
+            len(frame_paths), from_event_type, to_event_type
+        ),
+        max_new_tokens=12,
+    )
+    compact = raw_output.strip().strip("`").strip()
+    match = re.fullmatch(r'(?:frame\s*[:=]\s*)?(\d+)', compact, re.IGNORECASE)
+    frame_number = int(match.group(1)) if match is not None else -1
+    model_calls = 1
+
+    # 2B 模型偶尔会在已经看见目标动作时仍机械输出 0。此时不依赖
+    # description 建立事件，而是对同一组图片逐帧做一次更简单的 0/1
+    # 视觉复核。连续两个 1 才视为目标动作已经稳定开始。
+    presence_raw = ""
+    presence_bits = ""
+    if frame_number == 0:
+        presence_raw = run_vlm(
+            model=model,
+            processor=processor,
+            image_paths=frame_paths,
+            prompt=build_transition_presence_prompt(
+                len(frame_paths), to_event_type
+            ),
+            max_new_tokens=24,
+        )
+        model_calls += 1
+        raw_presence_text = presence_raw.strip().strip("`").strip()
+        contiguous = re.search(
+            rf"(?<!\d)([01]{{{len(frame_paths)}}})(?!\d)",
+            raw_presence_text,
+        )
+        if contiguous is not None:
+            bits = contiguous.group(1)
+        else:
+            standalone_bits = re.findall(
+                r"(?<!\d)[01](?!\d)", raw_presence_text
+            )
+            bits = "".join(standalone_bits)
+        if len(bits) == len(frame_paths):
+            presence_bits = bits
+            for index in range(len(bits) - 1):
+                if bits[index:index + 2] == "11":
+                    frame_number = index + 1
+                    break
+    valid = 1 <= frame_number <= len(frame_paths)
+    if valid:
+        if presence_bits:
+            # 保留完整二值序列，允许 other→reading→other 等双边界；
+            # 不能找到第一个 1 后就把所有后续帧强行铺成目标事件。
+            labels = [
+                to_event_type if bit == "1" else "other_behavior"
+                for bit in presence_bits
+            ]
+        else:
+            labels = ["other_behavior"] * (frame_number - 1)
+            labels.extend([to_event_type] * (len(frame_paths) - frame_number + 1))
+        segments = frame_labels_to_segments(labels, len(frame_paths))
+    else:
+        labels = []
+        segments = []
+    return {
+        "first_frame": frame_number if valid else 0,
+        "frame_labels": labels,
+        "activity_segments": segments,
+        "valid": valid,
+        "parse_error": "" if valid else "首次稳定动作帧号无效或目标动作未出现",
+        "_vlm_raw": raw_output,
+        "presence_vlm_raw": presence_raw,
+        "presence_bits": presence_bits,
+        "model_calls": model_calls,
+    }
+
+
 def analyze_position_transition(
     model,
     processor,
@@ -1615,10 +1759,49 @@ def analyze_position_transition(
         "static_away",
         "none",
     }
+    model_calls = 1
+    start_state = ""
+    end_state = ""
+    endpoint_raw: dict[str, str] = {}
+    if valid and change == expected and len(frame_paths) >= 2:
+        edge_count = min(2, len(frame_paths))
+        edge_paths = {
+            "start": frame_paths[:edge_count],
+            "end": frame_paths[-edge_count:],
+        }
+        for edge, selected_paths in edge_paths.items():
+            raw_state = run_vlm(
+                model=model,
+                processor=processor,
+                image_paths=selected_paths,
+                prompt=build_position_endpoint_prompt(event_type, edge),
+                max_new_tokens=12,
+            )
+            model_calls += 1
+            endpoint_raw[edge] = raw_state
+            state = raw_state.strip().strip("`").strip().lower()
+            if state not in {"standing", "sitting", "away", "unclear"}:
+                state = "unclear"
+            if edge == "start":
+                start_state = state
+            else:
+                end_state = state
+
+    endpoint_confirmed = (
+        start_state == "standing" and end_state == "sitting"
+        if event_type == "sit_at_study_position"
+        else start_state == "sitting" and end_state in {"standing", "away"}
+    )
+    confirmed = bool(valid and change == expected and endpoint_confirmed)
     return {
         "valid": valid,
-        "confirmed": bool(valid and change == expected),
+        "confirmed": confirmed,
         "position_change": change if valid else "none",
+        "start_state": start_state,
+        "end_state": end_state,
+        "endpoint_confirmed": endpoint_confirmed,
+        "endpoint_vlm_raw": endpoint_raw,
+        "model_calls": model_calls,
         "parse_error": "" if valid else "位置变化复核不是合法短 JSON",
         "_vlm_raw": raw_output,
     }

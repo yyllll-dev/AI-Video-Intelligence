@@ -68,9 +68,12 @@ def main():
         f"主判断{result['vlm_calls']['main']}次，"
         f"边界复核{result['vlm_calls']['boundary']}次，"
         f"整窗复核{result['vlm_calls'].get('window_label', 0)}次，"
+        f"首帧定位{result['vlm_calls'].get('transition_frame', 0)}次，"
         f"位置复核{result['vlm_calls'].get('position', 0)}次，"
+        f"全事件总结{result['vlm_calls'].get('summary', 0)}次，"
         f"合计{result['vlm_calls']['total']}次"
     )
+    print(f"全事件总结: {result['video_summary']}")
     print(f"错误数量: {len(result['errors'])}")
     print(f"结果文件: {report_path}")
 

@@ -61,8 +61,15 @@ natural-language search use the real runtime after analysis completes.
   beginning, middle, and end instead of duplicating the entire long recording.
 
 The visual demo can analyze either an uploaded video or the computer's first
-camera. Camera runs use the duration selected on the page and can be stopped
-from the UI.
+camera. Camera analysis continues until the Stop button is clicked; after the
+remaining queued analysis finishes, the page explicitly shows that analysis
+has ended.
+
+At the end of each run, the already loaded Qwen model combines the confirmed
+event sequence and every event caption into one factual whole-video summary.
+The presentation UI only exposes the input controls, this summary, the event
+timeline, natural-language search, and replay. Selecting a row in either the
+timeline or the search results immediately opens that event's replay clip.
 
 The event engine accepts a timestamp even for an empty frame, so absence-based
 events continue to advance when the detector finds no objects.

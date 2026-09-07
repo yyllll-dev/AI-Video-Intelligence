@@ -79,6 +79,12 @@ def fake_vlm(event, paths):
 
 
 def test_full_runtime_reaches_memory_and_retrieval(tmp_path):
+    summarized_records = []
+
+    def summarize(records):
+        summarized_records.extend(records)
+        return "人物先进入学习位置，随后完成阅读，最后离开座位。"
+
     runner = EndToEndRunner(
         source=FakeSource(),
         detector=fake_detector,
@@ -87,15 +93,18 @@ def test_full_runtime_reaches_memory_and_retrieval(tmp_path):
         clips_dir=tmp_path,
         buffer_fps=10,
         analysis_fps=10,
+        summary_analyzer=summarize,
     )
 
     result = runner.run()
     search_results = runner.search("什么时候阅读了？")
 
-    assert result["memories_saved"] == 2
+    assert result["memories_saved"] == 3
     assert not result["errors"]
     assert search_results
     assert search_results[0]["event_type"] == "reading"
+    assert result["video_summary"] == "人物先进入学习位置，随后完成阅读，最后离开座位。"
+    assert len(summarized_records) == result["memories_saved"]
 
 
 def test_realtime_runner_records_and_creates_event_replay(tmp_path):
@@ -676,7 +685,7 @@ def test_boundary_window_does_not_extend_previous_stable_on_parse_error(tmp_path
     ]
 
 
-def test_final_short_window_checks_tail_before_matching_stable(tmp_path):
+def test_final_short_window_continues_matching_stable_event(tmp_path):
     runner = _temporal_runner(tmp_path)
     paths = ["one.jpg"]
     runner._stage_or_remember_event(
@@ -693,7 +702,7 @@ def test_final_short_window_checks_tail_before_matching_stable(tmp_path):
         _temporal_meta("writing", "人物仍坐在桌前。"),
     )
     assert [record.event_type for record in runner.memory_store.list_all()] == [
-        "writing", "other_behavior"
+        "writing", "writing"
     ]
 
 

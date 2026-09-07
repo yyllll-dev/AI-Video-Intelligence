@@ -15,12 +15,35 @@ from src.vlm.prompt import (
     build_activity_prompt,
     build_caption_prompt,
     build_frame_labels_prompt,
+    build_video_summary_prompt,
     build_window_label_prompt,
 )
 
 
 def _events(**confirmed):
     return {name: bool(confirmed.get(name, False)) for name in ALL_EVENTS}
+
+
+def test_video_summary_prompt_contains_ordered_event_facts():
+    prompt = build_video_summary_prompt([
+        {
+            "start_time": 2.0,
+            "end_time": 10.0,
+            "event_type": "reading",
+            "caption": "人物持续阅读书本。",
+        },
+        {
+            "start_time": 10.0,
+            "end_time": 18.0,
+            "event_type": "writing",
+            "caption": "人物开始落笔书写。",
+        },
+    ])
+
+    assert "2.00s-10.00s | 阅读 | 人物持续阅读书本。" in prompt
+    assert "10.00s-18.00s | 书写 | 人物开始落笔书写。" in prompt
+    assert "不得虚构" in prompt
+    assert "直接输出总结正文" in prompt
 
 
 def test_prompt_uses_only_the_eight_root_event_types():

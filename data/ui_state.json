@@ -1,0 +1,19 @@
+{
+  "state": "completed",
+  "updated_at": "2026-09-07T20:29:48",
+  "input_mode": "上传视频",
+  "video_path": "C:\\Users\\于洋\\AppData\\Local\\Temp\\gradio\\0551f55b30e390c978a5cd7bb53f8525f47611b3dd55d33a76604f350f07031a\\微信视频2026-09-06_222513_025.mp4",
+  "ready": true,
+  "status_html": "<div class=\"status-line\"><span class=\"status-dot done\"></span><span>分析结束</span></div>",
+  "video_summary": "在这段视频中，一个人物从站立或走近转为在学习位置坐下。随后，他们开始坐在桌子前看书，并且阅读。整个过程中没有出现任何其他重要的动作或事件。",
+  "timeline_choices": [
+    [
+      "坐到学习位置\n0.00s – 2.00s\n人物从站立或走近转为在学习位置坐下。",
+      "D:\\Competiton\\AI-Video-Intelligence\\data\\replays\\replay_5ef5e1943db3.mp4"
+    ],
+    [
+      "其他\n2.00s – 15.00s\n人物坐在桌子前看书，阅读。",
+      "D:\\Competiton\\AI-Video-Intelligence\\data\\replays\\replay_dd410781625d.mp4"
+    ]
+  ]
+}

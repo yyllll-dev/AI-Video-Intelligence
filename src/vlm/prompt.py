@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from ..event.event_types import ALL_EVENTS
 
 
@@ -26,9 +28,34 @@ EVENT_FOCUS = {
     "writing": "人物是否持续落笔写字、做题或记录。",
     "phone_usage": "人物是否持续注视或操作手机；只拿起、移动或放下不算。",
     "computer_usage": "人物是否持续注视电脑屏幕、操作键盘或鼠标；打开、移动或收起不算。",
-    "communication_distraction": "人物是否与他人交谈、通话并偏离原动作。",
+    "communication_distraction": "至少两人同框并朝向彼此；出现交谈、眼神交流、回应、倾听或轮流互动任一项即可。",
     "other_behavior": "无法判断，或正在准备、收拾、整理、摆放和切换学习用品。",
 }
+
+
+def build_video_summary_prompt(records: list[dict[str, Any]]) -> str:
+    """根据已确认事件及其描述构造全视频总结 Prompt。"""
+    if not records:
+        raise ValueError("records 不能为空")
+
+    timeline = "\n".join(
+        f"{index}. {float(record['start_time']):.2f}s-"
+        f"{float(record['end_time']):.2f}s | "
+        f"{EVENT_TYPE_CN.get(str(record['event_type']), str(record['event_type']))} | "
+        f"{str(record.get('caption', '')).strip()}"
+        for index, record in enumerate(records, start=1)
+    )
+    return f"""你是学习行为视频总结助手。下面是系统已经确认的完整事件时间线，每条包含起止时间、事件类型和该事件的视觉描述。
+
+{timeline}
+
+请综合全部事件生成一段自然、客观、适合展示给评委的中文总结：
+- 必须覆盖主要行为、行为先后顺序和明显的状态变化。
+- 可以概括重复事件，但不得遗漏重要事件类型。
+- 只能使用上面提供的事实，不得虚构人物身份、物品、原因、情绪或学习效果。
+- 不评价好坏，不提模型、检测、事件标签、置信度或“根据记录”。
+- 控制在 120 至 220 个汉字；事件很少时可以更短。
+- 直接输出总结正文，不要标题、列表、Markdown、JSON 或额外解释。"""
 
 
 _OBJECT_CLUE_CN = {
@@ -110,7 +137,7 @@ def build_activity_prompt(
 - writing：持续看到笔接触纸面并写字、做题或记录；只拿笔、笔袋或摆放纸张不算。
 - phone_usage：持续注视、滑动、点击或操作手机；只拿起、移动或放下手机不算。
 - computer_usage：持续注视电脑屏幕、操作键盘或鼠标；只打开、合上、移动或收起电脑不算。
-- communication_distraction：与他人交谈、通话并偏离原动作。
+- communication_distraction：至少两人同框并朝向彼此，出现交谈、眼神交流、回应、倾听或轮流互动中的任一项即可；不要求持续说话，也不要求明确中断原动作。交流时即使桌上有书或电脑，也优先算交流分心。仅路过或各做各的不算。
 - other_behavior：无法判断具体动作，或正在收拾、整理、摆放、拿出/收起学习用品，以及两个主要事件之间的准备和切换过程。
 
 规则：
@@ -165,6 +192,7 @@ def build_frame_labels_prompt(
 本窗口只允许：{allowed}
 坐到学习位置必须看到站立/走近到坐下的变化；静态坐着不是入座。
 拿书找页、收电脑、拿笔袋、整理摆放、动作切换和不完整收尾选 other_behavior。
+至少两人同框并朝向彼此，出现交谈、眼神交流、回应、倾听或轮流互动任一项时选 communication_distraction；仅路过或各做各的不算。
 阅读中的短暂翻页仍选 reading。只有真正落笔才选 writing。
 不要按标签列表顺序轮流填写。相邻画面动作没变时必须保持同一标签。
 只输出一个 JSON 对象：键名为 frame_labels，值为恰好 {frame_count} 个标签的数组。不要解释。"""
@@ -191,9 +219,45 @@ reading：眼睛持续看印刷书页；短暂翻页仍是阅读。
 writing：清楚看到手持笔，笔尖接触纸面并持续移动书写；桌面有书不等于阅读。
 computer_usage：持续看电脑屏幕，或手在键盘、触控板、鼠标上操作；笔记本电脑是电脑，不是书。
 phone_usage：持续看或操作手机。
-communication_distraction：与他人交谈或通话并中断原动作。
+communication_distraction：至少两人同框并朝向彼此，出现交谈、眼神交流、回应、倾听或轮流互动任一项即可；不要求持续说话。交流时即使桌上有书或电脑也选此项。仅路过或各做各的不算。
 other_behavior：拿出、移动、收起、整理物品，准备/切换动作，动作混合或无法确认。
-若前后动作不一致，选择 other_behavior。不要描述场景，不要 JSON，不要解释，只输出一个允许的英文标签。"""
+    若前后动作不一致，选择 other_behavior。不要描述场景，不要 JSON，不要解释，只输出一个允许的英文标签。"""
+
+
+def build_first_transition_frame_prompt(
+    frame_count: int,
+    from_event_type: str,
+    to_event_type: str,
+) -> str:
+    """构造只定位新动作首次稳定出现帧号的短 Prompt。"""
+    frame_count = int(frame_count)
+    if frame_count <= 1:
+        raise ValueError("frame_count 必须大于 1")
+    if from_event_type not in EVENT_TYPES or to_event_type not in EVENT_TYPES:
+        raise ValueError("from/to event_type 包含未知事件")
+    target_rule = EVENT_FOCUS[to_event_type]
+    return f"""按时间观察编号 1-{frame_count} 的视频帧。
+窗口正在从 {from_event_type} 过渡到 {to_event_type}。
+目标动作标准：{target_rule}
+找出 {to_event_type} 第一次已经明确、稳定开始的帧；仅有相关物体、拿取、打开、摆放或准备动作不算开始。
+如果全部帧都没有稳定开始，输出 0。不要描述场景，不要 JSON，不要解释，只输出 0-{frame_count} 的一个整数。"""
+
+
+def build_transition_presence_prompt(
+    frame_count: int,
+    to_event_type: str,
+) -> str:
+    """构造逐帧二值复核 Prompt，作为首帧号输出失败时的后备。"""
+    frame_count = int(frame_count)
+    if frame_count <= 1:
+        raise ValueError("frame_count 必须大于 1")
+    if to_event_type not in EVENT_TYPES:
+        raise ValueError("to_event_type 包含未知事件")
+    target_rule = EVENT_FOCUS[to_event_type]
+    return f"""按顺序判断 {frame_count} 张视频帧中是否已经明确进行 {to_event_type}。
+判断标准：{target_rule}
+每帧只能写 0 或 1：准备、拿取、摆放或看不清写 0；目标动作已明确进行写 1。
+严格输出连续 {frame_count} 位数字，例如 000111111。不要 JSON、标点、空格或解释。"""
 
 
 def build_position_transition_prompt(event_type: str) -> str:
@@ -213,3 +277,15 @@ def build_position_transition_prompt(event_type: str) -> str:
 position_change 只能是 {positive}、{static}、none。
 只有连续帧明确显示完整变化才选 {positive}；只看到最终状态选 {static}。
 只输出合法 JSON：{{"position_change":"none"}}"""
+
+
+def build_position_endpoint_prompt(event_type: str, edge: str) -> str:
+    """构造位置事件首尾姿态校验 Prompt。"""
+    if event_type not in {"sit_at_study_position", "leave_study_position"}:
+        raise ValueError(f"不是位置变化事件: {event_type}")
+    if edge not in {"start", "end"}:
+        raise ValueError("edge 必须是 start 或 end")
+    edge_cn = "窗口开头" if edge == "start" else "窗口结尾"
+    return f"""这些图片只来自{edge_cn}，判断人物相对学习座椅的姿态。
+standing：人物站立或正在走动；sitting：人物臀部已在椅子上并稳定坐着；away：人物已经离开；unclear：看不清。
+不要根据问题猜测动作，不描述场景，不输出 JSON，只输出 standing、sitting、away、unclear 中的一个。"""

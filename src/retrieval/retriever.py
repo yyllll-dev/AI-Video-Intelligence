@@ -113,13 +113,19 @@ class VideoMemoryService:
             raise ValueError("top_k 必须大于 0")
         processed_query = self._query_processor.process(query)
         query_embedding = self._encode(processed_query)
+        requested_event_type = match_event_type(query)
+        candidates = [
+            record
+            for record in self._store.list_all()
+            if requested_event_type is None or record.event_type == requested_event_type
+        ]
 
         results = [
             SearchResult(
                 record=record,
                 similarity_score=cosine_similarity(query_embedding, record.embedding),
             )
-            for record in self._store.list_all()
+            for record in candidates
         ]
         results.sort(key=lambda result: result.similarity_score, reverse=True)
         return [
