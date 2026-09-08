@@ -40,6 +40,14 @@ MODEL_PATH = (
     / "yolo11n.pt"
 )
 
+# Intel GPU / CPU / NPU 通过 OpenVINO IR 目录运行。该目录由
+# tools/intel/prepare_yolo_openvino.py 从上面的 PyTorch 权重导出。
+OPENVINO_MODEL_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "models"
+    / "yolo11n_openvino_model"
+)
+
 
 # ============================================================
 # 2. YOLO 推理参数
@@ -52,8 +60,8 @@ CONF_THRESHOLD = 0.5
 # NMS（非极大值抑制）的 IoU 阈值。
 IOU_THRESHOLD = 0.45
 
-# 第一版先使用 CPU，确保项目能够稳定运行。
-# 后续如果设备支持 GPU / NPU，再进行性能优化。
+# 默认沿用项目原有的第 0 个 CUDA 设备配置。Intel GPU 不使用该值，
+# 而是通过环境变量 YOLO_DEVICE=intel:gpu 选择 OpenVINO 后端。
 DEVICE = "0"
 
 

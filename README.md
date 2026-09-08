@@ -133,6 +133,18 @@ python -m pip install -r requirements.txt
 python -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
 ```
 
+上面的检查只针对 NVIDIA CUDA。Intel 核显/独显运行 YOLO 时不使用 CUDA，按下一节安装 OpenVINO。
+
+### 5.4 Intel GPU 的 YOLO 可选依赖
+
+在 Intel AI PC 上执行：
+
+```powershell
+python -m pip install -r requirements-intel.txt
+```
+
+该文件包含普通项目依赖并额外安装 OpenVINO。未选择 `intel:*` 设备时，原有 CPU / NVIDIA CUDA 路径不受影响。
+
 ## 6. 模型准备
 
 ### 6.1 YOLO11n
@@ -150,6 +162,14 @@ https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n.pt
 ```
 
 下载后必须保持文件名为 `yolo11n.pt` 并放入项目根目录的 `models/`。
+
+Intel GPU 不能直接把 PyTorch `.pt` 权重当作 CUDA 模型运行。安装 Intel 依赖后，在学妹的 Intel AI PC 上执行一次导出和真实推理检查：
+
+```powershell
+python tools/intel/prepare_yolo_openvino.py --device intel:gpu --precision fp16
+```
+
+脚本会生成本机文件 `models/yolo11n_openvino_model/`，检查 OpenVINO 是否确实识别到 `GPU`，并在该 GPU 上完成一次 YOLO 推理。只有看到 `PASS: inference completed on the requested Intel device` 才能把本次 YOLO 设备记为 Intel GPU；否则应更新 Intel 显卡驱动或暂时使用 CPU，不得把回退结果写成 GPU 测试。
 
 ### 6.2 Qwen2-VL-2B-Instruct
 
@@ -214,6 +234,21 @@ $env:YOLO_DEVICE = "cpu"
 python demo/app.py
 ```
 
+Intel GPU 模式（须先完成 6.1 节的导出和检查）：
+
+```powershell
+$env:QWEN_VL_MODEL_PATH = "D:\AIModels\Qwen2-VL-2B-Instruct"
+.\run.ps1 -YoloDevice intel:gpu
+```
+
+首次安装 Intel 依赖也可通过启动脚本执行：
+
+```powershell
+.\run.ps1 -InstallDependencies -QwenModelPath "D:\AIModels\Qwen2-VL-2B-Instruct" -YoloDevice intel:gpu
+```
+
+依赖安装完成后仍须按 6.1 节导出一次 OpenVINO 模型；如果尚未导出，启动脚本会明确提示运行 `tools/intel/prepare_yolo_openvino.py`。
+
 启动成功后访问：
 
 ```text
@@ -225,7 +260,8 @@ http://127.0.0.1:7860
 | 变量 | 默认值 | 作用 |
 |---|---|---|
 | `QWEN_VL_MODEL_PATH` | 未设置 | Qwen2-VL 本地模型目录；未设置时使用 ModelScope 下载/缓存 |
-| `YOLO_DEVICE` | `cpu` | YOLO 推理设备；常用值为 `cpu`、`0` 或 `cuda:0` |
+| `YOLO_DEVICE` | `0` | YOLO 推理设备；`cpu` 为 CPU，`0` / `cuda:0` 为 NVIDIA CUDA，`intel:gpu` 为 Intel GPU OpenVINO |
+| `YOLO_OPENVINO_MODEL_PATH` | `models/yolo11n_openvino_model` | 可选的 OpenVINO YOLO IR 模型目录 |
 | `YOLO_CONFIDENCE` | `0.35` | Web 应用中的 YOLO 最低置信度 |
 
 ### 7.3 页面启动状态
@@ -293,7 +329,7 @@ python -m src.main --source "D:\Videos\sample.mp4" --qwen-model-path "D:\AIModel
 |---|---|---|
 | `--source` | 必填 | 视频路径或摄像头编号 `0` |
 | `--qwen-model-path` | 未设置 | 本地 Qwen 模型目录 |
-| `--yolo-device` | `cpu` | YOLO 推理设备 |
+| `--yolo-device` | `0` | YOLO 推理设备；Intel GPU 使用 `intel:gpu` |
 | `--yolo-confidence` | `0.5` | 命令行模式下的检测阈值 |
 | `--analysis-fps` | `2.0` | 每秒送入分析链路的目标帧数 |
 | `--buffer-fps` | `2.0` | 关键帧缓冲采样率 |
@@ -305,6 +341,16 @@ python -m src.main --source "D:\Videos\sample.mp4" --qwen-model-path "D:\AIModel
 | `--query` | `刚才发生了什么？` | 运行完成后的检索问题 |
 | `--trace` | 关闭 | 输出完整处理链路日志 |
 | `--no-vlm` | 关闭 | 不加载 Qwen，仅运行前半链路 |
+
+### 9.1 Intel AI PC 简化性能测试
+
+完成 Intel GPU 导出检查后，用同一环境对指定测试视频运行一次完整 Pipeline：
+
+```powershell
+python tools/performance/run_intel_benchmark.py --source "D:\Videos\test_15s.mp4" --qwen-model-path "D:\AIModels\Qwen2-VL-2B-Instruct" --yolo-device intel:gpu --label intel_ai_pc
+```
+
+结果写入 `docs/performance/intel_ai_pc_时间/`。`environment.json` 和性能结果会分别记录 YOLO 的请求设备、实际设备、OpenVINO 后端、导出精度及 OpenVINO 可用设备，便于证明 YOLO 确实在 Intel GPU 上运行。这里的 `intel:gpu` 只决定 YOLO；Qwen 的实际设备仍由 PyTorch / Transformers 检测，并会单独记录，二者不能混写。
 
 ## 10. 运行时数据
 

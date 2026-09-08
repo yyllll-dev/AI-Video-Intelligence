@@ -25,7 +25,7 @@ models/*.pt
 models/*.pth
 models/*.onnx
 models/*.safetensors
+models/*_openvino_model/
 modelscope_cache/
 .huggingface/
 Ultralytics/
-

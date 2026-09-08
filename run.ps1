@@ -15,6 +15,9 @@ starting demo\app.py.
 .\run.ps1 -InstallDependencies -YoloDevice cpu
 
 .EXAMPLE
+.\run.ps1 -InstallDependencies -YoloDevice intel:gpu
+
+.EXAMPLE
 .\run.ps1 -CheckOnly
 #>
 
@@ -37,8 +40,31 @@ $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $requirementsPath = Join-Path $projectRoot "requirements.txt"
+$intelRequirementsPath = Join-Path $projectRoot "requirements-intel.txt"
 $appPath = Join-Path $projectRoot "demo\app.py"
 $yoloWeightPath = Join-Path $projectRoot "models\yolo11n.pt"
+$defaultOpenvinoModelPath = Join-Path $projectRoot "models\yolo11n_openvino_model"
+
+if (-not $YoloDevice) {
+    $YoloDevice = if ($env:YOLO_DEVICE) { $env:YOLO_DEVICE } else { "0" }
+}
+$isIntelYoloDevice = $YoloDevice.StartsWith(
+    "intel:",
+    [System.StringComparison]::OrdinalIgnoreCase
+)
+if ($isIntelYoloDevice -and $YoloDevice.ToLowerInvariant() -notin @("intel:gpu", "intel:cpu", "intel:npu")) {
+    throw "Unsupported Intel YOLO device '$YoloDevice'. Use intel:gpu, intel:cpu, or intel:npu."
+}
+
+$openvinoModelPath = $defaultOpenvinoModelPath
+if ($env:YOLO_OPENVINO_MODEL_PATH) {
+    $openvinoModelPath = if ([IO.Path]::IsPathRooted($env:YOLO_OPENVINO_MODEL_PATH)) {
+        $env:YOLO_OPENVINO_MODEL_PATH
+    } else {
+        Join-Path $projectRoot $env:YOLO_OPENVINO_MODEL_PATH
+    }
+    $env:YOLO_OPENVINO_MODEL_PATH = $openvinoModelPath
+}
 
 function Resolve-PythonInvocation {
     param([string]$RequestedPath)
@@ -114,6 +140,9 @@ function Invoke-SelectedPython {
 if (-not (Test-Path -LiteralPath $requirementsPath -PathType Leaf)) {
     throw "Requirements file not found: $requirementsPath"
 }
+if ($isIntelYoloDevice -and -not (Test-Path -LiteralPath $intelRequirementsPath -PathType Leaf)) {
+    throw "Intel requirements file not found: $intelRequirementsPath"
+}
 if (-not (Test-Path -LiteralPath $appPath -PathType Leaf)) {
     throw "Application entry point not found: $appPath"
 }
@@ -139,9 +168,14 @@ Write-Host "[VisionOracle] Project: $projectRoot"
 Write-Host "[VisionOracle] Python: $($python.Description) ($version)"
 
 if ($InstallDependencies) {
-    Write-Host "[VisionOracle] Installing dependencies from requirements.txt..."
+    $selectedRequirementsPath = if ($isIntelYoloDevice) {
+        $intelRequirementsPath
+    } else {
+        $requirementsPath
+    }
+    Write-Host "[VisionOracle] Installing dependencies from $([IO.Path]::GetFileName($selectedRequirementsPath))..."
     Invoke-SelectedPython -Python $python -Arguments @(
-        "-m", "pip", "install", "-r", $requirementsPath
+        "-m", "pip", "install", "-r", $selectedRequirementsPath
     )
     if ($LASTEXITCODE -ne 0) {
         throw "Dependency installation failed. Check the PyTorch, CUDA, and network notes in README.md."
@@ -181,6 +215,26 @@ if ($missingText) {
     throw "Missing Python packages: $missingText. Run .\run.ps1 -InstallDependencies."
 }
 
+if ($isIntelYoloDevice) {
+    $openvinoCheck = @'
+import importlib.util
+print('yes' if importlib.util.find_spec('openvino') else 'no')
+'@
+    $hasOpenvino = Invoke-SelectedPython -Python $python -Arguments @(
+        "-c", $openvinoCheck
+    )
+    if (($hasOpenvino -join "").Trim() -ne "yes") {
+        throw "OpenVINO is required for $YoloDevice. Run .\run.ps1 -InstallDependencies -YoloDevice $YoloDevice."
+    }
+
+    $openvinoXml = Get-ChildItem -LiteralPath $openvinoModelPath -Filter *.xml -File -ErrorAction SilentlyContinue
+    $openvinoBin = Get-ChildItem -LiteralPath $openvinoModelPath -Filter *.bin -File -ErrorAction SilentlyContinue
+    $openvinoMetadata = Join-Path $openvinoModelPath "metadata.yaml"
+    if (-not $openvinoXml -or -not $openvinoBin -or -not (Test-Path -LiteralPath $openvinoMetadata -PathType Leaf)) {
+        throw "OpenVINO YOLO model is missing. Run: python tools/intel/prepare_yolo_openvino.py --device $YoloDevice"
+    }
+}
+
 $ffmpegCheck = @'
 import importlib.util
 print('yes' if importlib.util.find_spec('imageio_ffmpeg') else 'no')
@@ -202,10 +256,6 @@ if ($QwenModelPath) {
     if (-not (Test-Path -LiteralPath $env:QWEN_VL_MODEL_PATH -PathType Container)) {
         throw "QWEN_VL_MODEL_PATH does not point to an existing directory: $env:QWEN_VL_MODEL_PATH"
     }
-}
-
-if (-not $YoloDevice) {
-    $YoloDevice = if ($env:YOLO_DEVICE) { $env:YOLO_DEVICE } else { "0" }
 }
 
 $env:YOLO_DEVICE = $YoloDevice

@@ -1,0 +1,4 @@
+# Optional Intel GPU runtime for YOLO. Install requirements.txt first through
+# this include, then add OpenVINO for the exported YOLO IR model.
+-r requirements.txt
+openvino==2026.3.1

@@ -23,3 +23,6 @@ Pillow==12.3.0
 
 # Supplies a bundled FFmpeg executable for MP4 conversion and replay.
 imageio-ffmpeg==0.6.0
+
+# Resource sampling used by tools/performance/run_intel_benchmark.py.
+psutil==7.2.2

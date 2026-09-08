@@ -24,9 +24,10 @@
 | 模型任务 | 通用目标检测 |
 | 预训练数据 | COCO |
 | 项目权重路径 | `models/yolo11n.pt` |
+| Intel OpenVINO 模型路径 | `models/yolo11n_openvino_model/`（由本机导出，不提交 Git） |
 | 当前权重大小 | 5,613,764 字节，约 5.35 MiB |
 | 当前文件 SHA-256 | `0EBBC80D4A7680D14987A577CD21342B65ECFD94632BD9A8DA63AE6417644EE1` |
-| 项目中使用的库 | `ultralytics==8.4.140` |
+| 项目中使用的库 | `ultralytics==8.4.140`；Intel 路径另用 `openvino==2026.3.1` |
 
 Ultralytics 官方 YOLO11 文档将 `yolo11n.pt` 列为目标检测权重。官方 COCO 参考表给出的 YOLO11n 规模约为 2.6M 参数、6.5B FLOPs；这些是官方通用基准信息，不是 VisionOracle 的应用性能测试结果。
 
@@ -48,7 +49,7 @@ YOLO11n 对送入分析链路的视频帧执行目标检测。当前只保留以
 ### 3.3 选择理由
 
 - `n` 版本体积小、加载快，适合 AI PC 和现场演示。
-- 能在 CPU 上运行，也可以通过 Ultralytics 使用 NVIDIA GPU。
+- 能在 CPU 上运行，可通过 Ultralytics 使用 NVIDIA CUDA，也可把同一权重导出为 OpenVINO IR 后在 Intel GPU 上运行。
 - COCO 类别已覆盖人物、书本、手机、电脑和桌椅等基础视觉对象。
 - 与较大的 YOLO11 版本相比，更适合把计算资源留给视觉语言模型。
 
@@ -195,6 +196,14 @@ Get-FileHash .\models\yolo11n.pt -Algorithm SHA256
 0EBBC80D4A7680D14987A577CD21342B65ECFD94632BD9A8DA63AE6417644EE1
 ```
 
+Intel AI PC 使用同一份权重导出的 FP16 OpenVINO IR。运行下面的命令后，只有出现 `PASS` 才能把实际 YOLO 推理设备记录为 Intel GPU：
+
+```powershell
+python tools/intel/prepare_yolo_openvino.py --device intel:gpu --precision fp16
+```
+
+导出目录中的 `visionoracle_export.json` 记录源权重 SHA-256、导出精度、OpenVINO/Ultralytics 版本、验证设备和验证时间。OpenVINO IR 是部署格式转换，不代表模型经过重新训练或微调。
+
 ### 7.2 Qwen 模型校验
 
 Qwen 权重未直接放入项目压缩包，原因是体积较大。提交材料应保留：
@@ -203,7 +212,7 @@ Qwen 权重未直接放入项目压缩包，原因是体积较大。提交材料
 - 实际下载来源。
 - 本地模型目录或缓存位置。
 - ModelScope 下载生成的文件清单及版本信息。
-- 性能测试时使用的 PyTorch、Transformers 和 CUDA 版本。
+- 性能测试时使用的 PyTorch、Transformers，以及实际使用的 CUDA 或 OpenVINO 版本。
 
 ## 8. 声明
 
