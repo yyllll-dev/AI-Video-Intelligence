@@ -19,7 +19,12 @@ from ..event.event_types import (
     ALL_EVENTS,
 )
 from ..event.schemas import Event
-from ..retrieval import HashingEmbedder, InMemoryStore, VideoMemoryService
+from ..retrieval import (
+    HashingEmbedder,
+    InMemoryStore,
+    VideoMemoryService,
+    merge_events_for_display,
+)
 from ..tracking.tracker import SimpleTracker
 from ..vlm.inference import (
     analyze_event,
@@ -28,6 +33,7 @@ from ..vlm.inference import (
     analyze_position_transition,
     analyze_window_label,
     description_conflicts_with_event,
+    description_is_reading_page_turn,
     description_has_transition_evidence,
     infer_activity_from_description,
     infer_activities_from_vlm_meta,
@@ -158,7 +164,7 @@ class EndToEndRunner:
         summary_analyzer: Optional[SummaryAnalyzer] = None,
         use_vlm: bool = True,
         qwen_model_path: Optional[str] = None,
-        yolo_device: str = "cpu",
+        yolo_device: str = "0",
         yolo_confidence: float = 0.5,
         clips_dir: str | Path | None = None,
         recordings_dir: str | Path | None = None,
@@ -1148,6 +1154,20 @@ class EndToEndRunner:
             return False
         if event.is_final_window or event.event_type in _TRANSITION_EVENT_TYPES:
             return True
+        # 开头窗口通常需要找边界，但主VLM已确认整窗阅读且描述为翻页/
+        # 翻阅时，画面运动来自阅读本身，不能据此机械切成 other-reading-other。
+        early_description = str(meta.get("objective_description", ""))
+        early_events = meta.get("events", {})
+        early_true_types = [
+            name for name, value in early_events.items()
+            if name in ALL_EVENTS and bool(value)
+        ] if isinstance(early_events, dict) else []
+        if (
+            early_true_types == ["reading"]
+            and description_is_reading_page_turn(early_description)
+            and not meta.get("parse_error")
+        ):
+            return False
         # 视频开头直到 12 秒都允许逐帧寻找真正的入座和准备边界。
         if event.start_time < 12.0:
             return True
@@ -1420,7 +1440,18 @@ class EndToEndRunner:
             labels.count(to_event) / len(labels) if labels else 0.0
         )
         motion_span = self._stable_motion_span(paths)
-        if motion_span is not None and target_ratio >= 0.65:
+        description = str(
+            meta.get("objective_description", meta.get("description", ""))
+        )
+        reading_page_turn = (
+            to_event == "reading"
+            and description_is_reading_page_turn(description)
+        )
+        if (
+            motion_span is not None
+            and target_ratio >= 0.65
+            and not reading_page_turn
+        ):
             motion_start, motion_end, motion_scores = motion_span
             labels = ["other_behavior"] * len(labels)
             labels[motion_start - 1:motion_end] = [to_event] * (
@@ -2526,12 +2557,23 @@ class EndToEndRunner:
         if not records:
             return "本次视频中没有确认到可总结的具体事件。"
         ordered = EndToEndRunner._summary_records(records)
-        event_types = [str(record["event_type"]) for record in ordered]
+        event_types: list[str] = []
+        for record in ordered:
+            event_type = str(record["event_type"]).strip()
+            if not event_types or event_types[-1] != event_type:
+                event_types.append(event_type)
         has_other = "other_behavior" in event_types
         actions = [
             _SUMMARY_ACTION_CN[event_type]
             for event_type in event_types
             if event_type in _SUMMARY_ACTION_CN
+        ]
+        # other 不直接出现在动作枚举中。过滤后还要再压缩一次，否则
+        # reading-other-reading 会在总结里变成“阅读、阅读”。
+        actions = [
+            action
+            for index, action in enumerate(actions)
+            if index == 0 or action != actions[index - 1]
         ]
 
         if not actions:
@@ -2558,7 +2600,10 @@ class EndToEndRunner:
         return process + "。"
 
     @staticmethod
-    def _is_objective_video_summary(summary: str) -> bool:
+    def _is_objective_video_summary(
+        summary: str,
+        records: list[dict[str, Any]] | None = None,
+    ) -> bool:
         text = str(summary or "").strip()
         if not text or any(term in text for term in _NON_OBJECTIVE_SUMMARY_TERMS):
             return False
@@ -2566,11 +2611,21 @@ class EndToEndRunner:
             "准备、整理或动作切换",
             "准备、整理和动作切换",
         )
-        return not any(text.count(phrase) > 1 for phrase in repeated_other_phrases)
+        if any(text.count(phrase) > 1 for phrase in repeated_other_phrases):
+            return False
+        if records:
+            expected: dict[str, int] = {}
+            for record in EndToEndRunner._summary_records(records):
+                event_type = str(record.get("event_type", "")).strip()
+                expected[event_type] = expected.get(event_type, 0) + 1
+            for event_type, phrase in _SUMMARY_ACTION_CN.items():
+                if text.count(phrase) > expected.get(event_type, 0):
+                    return False
+        return True
 
     def _generate_video_summary(self) -> str:
         records = self._summary_records(
-            [record.to_dict() for record in self.memory_store.list_all()]
+            merge_events_for_display(self.memory_store.list_all())
         )
         if not records:
             return self._fallback_video_summary(records)
@@ -2580,7 +2635,7 @@ class EndToEndRunner:
             return self._fallback_video_summary(records)
         try:
             summary = self.summary_analyzer(records).strip()
-            if self._is_objective_video_summary(summary):
+            if self._is_objective_video_summary(summary, records):
                 return summary
         except Exception as exc:
             self.errors.append(f"全事件总结失败: {exc}")

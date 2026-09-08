@@ -852,7 +852,8 @@ def app_header() -> str:
 def status_html(state: str) -> str:
     label = {
         "idle": "待分析",
-        "loading": "正在加载模型（尚未录制）",
+        "loading": "正在加载模型",
+        "loading_camera": "正在加载模型（尚未开始录制）",
         "ready": "模型已就绪",
         "starting": "正在启动摄像头（尚未录制）",
         "run": "运行中",
@@ -889,7 +890,7 @@ def _prepare_models() -> None:
         try:
             if _prepared_detector is None:
                 _prepared_detector = YoloDetector(
-                    device=os.getenv("YOLO_DEVICE", "cpu"),
+                    device=os.getenv("YOLO_DEVICE", "0"),
                     conf_threshold=float(os.getenv("YOLO_CONFIDENCE", "0.35")),
                 )
             # load_model 自带进程级缓存；后续每轮 EndToEndRunner 会直接复用。
@@ -1144,16 +1145,27 @@ def on_search(query: str):
             gr.update(choices=[], value=None, visible=False),
             gr.update(value="请先完成视频分析。", visible=True),
         )
-    found = merge_events_for_display(
-        _runtime_runner.search(query or "刚才发生了什么？", top_k=50)
-    )
+    requested_type = match_event_type(query or "")
+    if requested_type is not None:
+        # 与最终时间线使用同一份去抖结果，避免搜索再次展示已被消除的
+        # 三秒内 other，或把同一持续行为拆成多个结果。
+        found = [
+            item
+            for item in merge_events_for_display(
+                _runtime_runner.memory_store.list_all()
+            )
+            if item["event_type"] == requested_type
+        ]
+    else:
+        found = merge_events_for_display(
+            _runtime_runner.search(query or "刚才发生了什么？", top_k=50)
+        )
     for item in found:
         if item["merged_event_count"] > 1:
             item["video_path"] = _runtime_runner.create_replay(
                 item["start_time"], item["end_time"]
             )
     choices = _event_choices(found)
-    requested_type = match_event_type(query or "")
     if requested_type is None:
         feedback = "未识别到明确的事件类型，以下结果按内容相关度排序。"
     elif choices:
@@ -1337,8 +1349,16 @@ def on_start(input_mode, video_path):
         video_path=(str(video_path) if video_path else None),
     )
     if not _models_ready.is_set():
+        loading_state = (
+            "loading_camera" if input_mode == "本机摄像头" else "loading"
+        )
+        loading_message = (
+            "模型正在准备，当前尚未开始录制……"
+            if input_mode == "本机摄像头"
+            else "正在加载模型并准备视频分析……"
+        )
         yield (
-            status_html("loading"), summary_html("模型正在准备，当前尚未开始录制……"),
+            status_html(loading_state), summary_html(loading_message),
             gr.update(choices=[], value=None, visible=False),
             gr.update(interactive=False), gr.update(interactive=False),
             gr.update(value=None, visible=False),
@@ -1372,7 +1392,7 @@ def on_start(input_mode, video_path):
             source=source,
             detector=_prepared_detector,
             qwen_model_path=os.getenv("QWEN_VL_MODEL_PATH"),
-            yolo_device=os.getenv("YOLO_DEVICE", "cpu"),
+            yolo_device=os.getenv("YOLO_DEVICE", "0"),
             yolo_confidence=float(os.getenv("YOLO_CONFIDENCE", "0.35")),
         )
     except Exception as exc:

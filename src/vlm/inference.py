@@ -742,6 +742,7 @@ EVENT_CONTENT_KEYWORDS: dict[str, list[str]] = {
     "reading": [
         "持续看书", "专注看书", "看书", "读书", "看资料", "阅读",
         "看教材", "阅读书籍", "阅读资料", "注视书页", "浏览文字",
+        "翻页", "翻书页", "翻动书页", "翻阅", "换页", "翻到下一页",
     ],
     "writing": [
         "写字", "写作", "落笔", "记笔记", "做笔记", "做题", "画图",
@@ -765,7 +766,8 @@ EVENT_CONTENT_KEYWORDS: dict[str, list[str]] = {
     ],
     "other_behavior": [
         "整理", "收拾", "摆放", "归位", "拿出书", "取出书", "收起书",
-        "收好书", "拿起书", "放下书", "将书放", "打开书", "翻到", "寻找页码", "拿出笔袋", "打开笔袋",
+        "收好书", "拿起书", "放下书", "将书放", "打开书", "翻到目标页",
+        "寻找页码", "查找页码", "找页", "拿出笔袋", "打开笔袋",
         "收起笔袋", "拿出电脑", "打开电脑", "合上电脑", "关闭电脑",
         "移动电脑", "拿着电脑", "拿着一台笔记本电脑", "收起电脑", "收好电脑", "放回", "放好",
         "准备用品", "切换物品", "动作看不清", "无法判断",
@@ -827,6 +829,10 @@ def infer_activity_from_description(description: str) -> str | None:
     """从 VLM 描述中的明确动作词纠正 YOLO 产生的活动候选类型。"""
     if not isinstance(description, str):
         return None
+    # 阅读中的翻页是阅读动作的一部分，不能被准备/整理规则抢成 other。
+    # 只有明确寻找页码或翻到指定目标页时仍属于阅读前准备。
+    if description_is_reading_page_turn(description):
+        return "reading"
     # 过渡动作不是“低优先级未知项”。当描述明确说正在拿出、收起、
     # 整理或切换物品时，不能再被同一句中的 book/laptop 名词抢回阅读/电脑。
     if description_has_transition_evidence(description):
@@ -841,10 +847,28 @@ def infer_activity_from_description(description: str) -> str | None:
 
 def description_has_transition_evidence(description: str) -> bool:
     """是否明确描述了准备、收拾或事件切换动作。"""
+    if description_is_reading_page_turn(description):
+        return False
     return isinstance(description, str) and _description_supports_event(
         description,
         "other_behavior",
     )
+
+
+def description_is_reading_page_turn(description: str) -> bool:
+    """识别正常阅读中的翻页，并排除为开始阅读而找页的准备动作。"""
+    if not isinstance(description, str):
+        return False
+    preparation_terms = (
+        "寻找页码", "查找页码", "找页", "寻找页面", "查找页面",
+        "翻到目标页", "翻到指定页",
+    )
+    if any(term in description for term in preparation_terms):
+        return False
+    page_turn_terms = (
+        "翻页", "翻书页", "翻动书页", "翻阅", "翻过一页", "翻到下一页", "换页",
+    )
+    return any(term in description for term in page_turn_terms)
 
 
 def description_conflicts_with_event(description: str, event_type: str) -> bool:
@@ -1318,6 +1342,38 @@ def normalize_vlm_result(
         if parse_error
         else infer_activity_from_description(objective_description)
     )
+    # Qwen2-VL 偶尔会把单纯翻页勾成 other。仅在 JSON 成功解析且描述
+    # 明确是正常翻页时修正；解析失败时仍禁止从残缺描述制造具体事件。
+    if (
+        not parse_error
+        and description_is_reading_page_turn(objective_description)
+        and normalized_events.get("other_behavior", False)
+        and not any(
+            normalized_events.get(name, False)
+            for name in concrete_behaviors
+        )
+    ):
+        normalized_events["other_behavior"] = False
+        normalized_events["reading"] = True
+        normalized_segments = [
+            {
+                **segment,
+                "event_type": (
+                    "reading"
+                    if segment.get("event_type") == "other_behavior"
+                    else segment.get("event_type")
+                ),
+            }
+            for segment in normalized_segments
+        ]
+        primary_event = "reading"
+        observed_activities = [
+            "reading" if name == "other_behavior" else name
+            for name in observed_activities
+        ]
+        if "reading" not in observed_activities:
+            observed_activities.append("reading")
+        contract_warnings.append("正常翻页属于阅读，已将 other_behavior 修正为 reading")
     confirmed_concrete = {
         name for name in concrete_behaviors if normalized_events.get(name, False)
     }

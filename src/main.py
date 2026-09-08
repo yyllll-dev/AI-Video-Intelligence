@@ -12,7 +12,7 @@ def main():
     parser = argparse.ArgumentParser(description="AI Video Intelligence 端到端运行器")
     parser.add_argument("--source", required=True, help="视频路径，或摄像头编号 0")
     parser.add_argument("--qwen-model-path", help="本地 Qwen2/Qwen2.5-VL 模型目录")
-    parser.add_argument("--yolo-device", default="cpu", help="cpu、0 或 cuda:0")
+    parser.add_argument("--yolo-device", default="0", help="cpu、0 或 cuda:0")
     parser.add_argument("--yolo-confidence", type=float, default=0.5)
     parser.add_argument("--analysis-fps", type=float, default=2.0)
     parser.add_argument("--buffer-fps", type=float, default=2.0)

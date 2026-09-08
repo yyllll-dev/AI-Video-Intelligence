@@ -205,7 +205,7 @@ if ($QwenModelPath) {
 }
 
 if (-not $YoloDevice) {
-    $YoloDevice = if ($env:YOLO_DEVICE) { $env:YOLO_DEVICE } else { "cpu" }
+    $YoloDevice = if ($env:YOLO_DEVICE) { $env:YOLO_DEVICE } else { "0" }
 }
 
 $env:YOLO_DEVICE = $YoloDevice
