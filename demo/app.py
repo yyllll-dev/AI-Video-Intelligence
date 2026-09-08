@@ -25,9 +25,11 @@ if not hasattr(huggingface_hub, "HfFolder"):
 
 import gradio as gr
 
+from src.detection.detector import YoloDetector
 from src.pipeline.runtime import EndToEndRunner
 from src.pipeline.media_archive import prepare_browser_video
 from src.retrieval import match_event_type, merge_events_for_display
+from src.vlm.qwen_vlm import load_model
 
 from core import (
     event_label,
@@ -192,10 +194,14 @@ CSS = """
                font-size: 13px; color: var(--alm-muted) !important; margin: 10px 2px 2px; }
 .status-dot { width: 9px; height: 9px; border-radius: 50%; }
 .status-dot.idle { background: #cbd5e1; }
+.status-dot.loading, .status-dot.starting { background: #f59e0b; }
 .status-dot.run { background: #22c55e; box-shadow: 0 0 0 3px rgba(34, 197, 94, .2); }
+.status-dot.recording { background: #ef4444; box-shadow: 0 0 0 3px rgba(239, 68, 68, .18); }
 .status-dot.stop { background: #94a3b8; }
 .status-dot.ending { background: #f59e0b; }
 .status-dot.done { background: #22c55e; }
+.status-dot.ready { background: #22c55e; }
+.status-dot.error { background: #ef4444; }
 
 /* AI Analysis 卡片内部 */
 .analysis-section { font-size: 12px; font-weight: 600; color: var(--alm-muted) !important;
@@ -410,10 +416,14 @@ textarea:focus, input:focus { border-color:#818cf8 !important; box-shadow:0 0 0 
 #status-display { min-width:180px !important; min-height:52px !important;
   display:flex !important; align-items:center !important; }
 .panel-card .prose { color:#475569 !important; }
-.media-frame { width:min(100%,800px) !important; height:450px !important; margin:0 auto !important;
-  aspect-ratio:16/9 !important; border:1px solid #c7d2fe !important;
-  border-radius:14px !important; overflow:hidden !important; background:#fff !important;
-  box-shadow:0 12px 32px rgba(30,64,175,.10) !important; }
+.media-frame, .browser-camera-shell {
+  box-sizing:border-box !important; width:min(100%,800px) !important; height:450px !important;
+  min-height:450px !important; aspect-ratio:16/9 !important; margin:0 auto !important;
+  flex:0 0 auto !important; align-self:center !important;
+  border:1px solid #c7d2fe !important; border-radius:14px !important;
+  overflow:hidden !important; background:#fff !important;
+  box-shadow:0 12px 32px rgba(30,64,175,.10) !important;
+}
 .media-frame > div { height:100% !important; background:#fff !important; }
 .media-frame [data-testid="video"], .media-frame .upload-container,
 .media-frame button[aria-label*="上传"], .media-frame button[aria-label*="upload" i] {
@@ -427,12 +437,41 @@ textarea:focus, input:focus { border-color:#818cf8 !important; box-shadow:0 0 0 
 .media-frame video,
 .media-frame img { display:block !important; width:100% !important; height:100% !important;
   object-fit:cover !important; vertical-align:top !important; }
-.media-frame video { accent-color:#6366f1 !important; }
+.media-frame video { accent-color:#0f172a !important; }
 .media-frame video::-webkit-media-controls-panel {
   background:linear-gradient(to top,rgba(49,46,129,.88),rgba(79,70,229,.28)) !important;
 }
 .media-frame video::-webkit-media-controls-timeline {
   background-color:rgba(224,231,255,.72) !important; border-radius:999px !important;
+}
+.media-frame .controls input[type="range"] {
+  -webkit-appearance:none !important; appearance:none !important;
+  height:14px !important; min-height:14px !important;
+  background:transparent !important; border:0 !important;
+  color:#0f172a !important; accent-color:#0f172a !important;
+  cursor:pointer !important;
+}
+.media-frame .controls input[type="range"]::-webkit-slider-runnable-track {
+  height:4px !important; background:#cbd5e1 !important;
+  border:0 !important; border-radius:999px !important;
+}
+.media-frame .controls input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance:none !important; appearance:none !important;
+  width:12px !important; height:12px !important; margin-top:-4px !important;
+  border:2px solid #fff !important; border-radius:50% !important;
+  background:#0f172a !important; box-shadow:0 0 0 1px #0f172a !important;
+}
+.media-frame .controls input[type="range"]::-moz-range-track {
+  height:4px !important; background:#cbd5e1 !important;
+  border:0 !important; border-radius:999px !important;
+}
+.media-frame .controls input[type="range"]::-moz-range-progress {
+  height:4px !important; background:#0f172a !important; border-radius:999px !important;
+}
+.media-frame .controls input[type="range"]::-moz-range-thumb {
+  width:12px !important; height:12px !important;
+  border:2px solid #fff !important; border-radius:50% !important;
+  background:#0f172a !important; box-shadow:0 0 0 1px #0f172a !important;
 }
 .media-frame .icon-button-wrapper.top-panel {
   display:flex !important; flex-direction:row !important; align-items:center !important;
@@ -451,6 +490,7 @@ textarea:focus, input:focus { border-color:#818cf8 !important; box-shadow:0 0 0 
   display:none !important;
 }
 .media-frame progress {
+  height:6px !important; min-height:6px !important;
   color:#0f172a !important; accent-color:#0f172a !important;
   background:#fff !important; border:0 !important;
   border-radius:999px !important; overflow:hidden !important;
@@ -470,8 +510,14 @@ textarea:focus, input:focus { border-color:#818cf8 !important; box-shadow:0 0 0 
   color:#0f172a !important;
 }
 .media-frame .controls {
+  height:36px !important; min-height:36px !important;
+  padding-top:2px !important; padding-bottom:2px !important;
   border-top:1px solid #e2e8f0 !important;
   box-shadow:none !important;
+}
+.media-frame .controls .inner {
+  height:32px !important; min-height:32px !important;
+  padding-top:0 !important; padding-bottom:0 !important;
 }
 .media-frame .controls button,
 .media-frame .controls .icon,
@@ -492,10 +538,41 @@ textarea:focus, input:focus { border-color:#818cf8 !important; box-shadow:0 0 0 
 .media-frame button[aria-label*="重新"],
 .media-frame button[title*="Trim"],
 .media-frame button[title*="Reset"] { display:none !important; }
-.browser-camera-shell { position:relative; width:min(100%,800px); aspect-ratio:16/9; margin:0 auto;
-  overflow:hidden; border:1px solid #c7d2fe; border-radius:14px; background:#f8faff;
-  box-shadow:0 12px 32px rgba(30,64,175,.10); }
+.browser-camera-shell { position:relative; display:block; }
+.camera-preview-host,
+#camera-preview-host,
+#camera-preview-host > div,
+#camera-preview-host .prose {
+  box-sizing:border-box !important; width:100% !important;
+  margin:0 !important; padding:0 !important; gap:0 !important;
+  border:0 !important; background:transparent !important; box-shadow:none !important;
+}
+.input-mode-stack {
+  width:100% !important; margin:0 !important; padding:0 !important;
+  gap:12px !important; align-items:stretch !important;
+}
+.input-mode-stack > *,
+.input-mode-stack > .form,
+.input-mode-stack button { margin-top:0 !important; margin-bottom:0 !important; }
+.analysis-camera-frame {
+  box-sizing:border-box !important; width:min(100%,800px) !important;
+  height:450px !important; min-height:450px !important; aspect-ratio:16/9 !important;
+  margin:0 auto !important; padding:0 !important; overflow:hidden !important;
+}
+.analysis-camera-frame > div,
+.analysis-camera-frame [data-testid="image"] {
+  box-sizing:border-box !important; width:100% !important; height:100% !important;
+  min-height:0 !important; margin:0 !important; padding:0 !important; overflow:hidden !important;
+}
+.analysis-camera-frame .label-wrap,
+.analysis-camera-frame .icon-button-wrapper.top-panel { display:none !important; }
+.analysis-camera-frame img { width:100% !important; height:100% !important; object-fit:cover !important; }
+gradio-app[data-input-locked="true"] .tab-nav button {
+  pointer-events:none !important; cursor:not-allowed !important; opacity:1 !important;
+}
 .browser-camera-shell video { width:100%; height:100%; display:block; object-fit:cover; background:#f8faff; }
+.browser-camera-shell canvas { position:absolute; inset:0; z-index:1; display:none;
+  width:100%; height:100%; object-fit:cover; background:#f8faff; }
 .browser-camera-empty { position:absolute; inset:0; display:grid; place-items:center; color:#475569 !important;
   -webkit-text-fill-color:#475569 !important; background:#f8faff; font-size:14px; font-weight:600;
   pointer-events:none; }
@@ -552,21 +629,17 @@ textarea:focus, input:focus { border-color:#818cf8 !important; box-shadow:0 0 0 
   color:#0f172a !important; background:transparent !important;
 }
 #replay-dialog .section-head { margin:0 !important; }
-#replay-dialog .section-eyebrow,
-#replay-dialog .section-desc-new { display:none !important; }
+#replay-dialog .section-eyebrow { display:none !important; }
+#replay-dialog .section-desc-new {
+  display:block !important; margin:2px 0 0 4px !important;
+  color:#64748b !important; font-size:12px !important; line-height:1.4 !important;
+}
 #replay-dialog .section-title-new { margin:0 !important; padding-left:4px; font-size:17px !important; }
 #close-replay-btn button, button#close-replay-btn {
   min-width:64px !important; max-width:64px !important; min-height:32px !important;
 }
-#replay-dialog .controls button {
-  width:32px !important; min-width:32px !important; max-width:32px !important;
-  height:32px !important; min-height:32px !important; padding:5px !important;
-}
-#replay-dialog .controls button svg {
-  width:20px !important; height:20px !important;
-}
 #replay-dialog video { display:block !important; width:100% !important; max-height:calc(100vh - 94px) !important;
-  object-fit:contain !important; border-radius:9px !important; background:#000 !important; }
+  object-fit:cover !important; border-radius:9px !important; background:#fff !important; }
 #replay-dialog [data-testid="video"] { margin:0 !important; padding:0 !important; border:0 !important; }
 footer { display:none !important; }
 @media (max-width: 768px) {
@@ -579,7 +652,7 @@ footer { display:none !important; }
   .judge-pill { display:none !important; }
   .app-title { font-size:20px !important; }
   .panel-card { padding:15px !important; border-radius:16px !important; }
-  .media-frame { height:auto !important; min-height:220px !important; }
+  .media-frame, .browser-camera-shell { height:auto !important; min-height:220px !important; }
   #status-display { min-width:130px !important; }
   .summary-layout { grid-template-columns:minmax(0,1fr); }
   .summary-chart { justify-content:flex-start; padding:18px 0 0; border-left:0;
@@ -588,20 +661,35 @@ footer { display:none !important; }
 """
 
 CAMERA_OPEN_JS = """async () => {
+  const app = document.querySelector('gradio-app');
+  if (app && app.dataset.inputLocked === 'true') return [];
   const video = document.getElementById('browser-camera-video');
   const shell = document.getElementById('browser-camera-shell');
+  const host = document.getElementById('camera-preview-host');
   const empty = document.getElementById('browser-camera-empty');
+  const freeze = document.getElementById('browser-camera-freeze');
   if (!video || !shell) return [];
+  if (host) host.style.display = 'block';
   shell.style.display = 'block';
+  if (freeze) freeze.style.display = 'none';
   const analysisFrame = document.querySelector('.analysis-camera-frame');
   if (analysisFrame) analysisFrame.style.display = 'none';
+  const recording = document.querySelector('.camera-recording');
+  if (recording) recording.style.display = 'none';
   if (window.__almCameraStream) {
     video.srcObject = window.__almCameraStream;
     if (empty) empty.style.display = 'none';
     return [];
   }
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({video: true, audio: false});
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        width: {ideal: 1280},
+        height: {ideal: 720},
+        aspectRatio: {ideal: 16 / 9}
+      },
+      audio: false
+    });
     window.__almCameraStream = stream;
     video.srcObject = stream;
     if (empty) empty.style.display = 'none';
@@ -615,13 +703,124 @@ CAMERA_OPEN_JS = """async () => {
 }"""
 
 CAMERA_START_JS = """(mode, videoPath) => {
+  const app = document.querySelector('gradio-app');
+  if (app) app.dataset.inputLocked = 'true';
+  document.querySelectorAll('.tab-nav button').forEach(button => {
+    button.disabled = true;
+    button.setAttribute('aria-disabled', 'true');
+  });
+  if (window.__almInputUnlockTimer) clearInterval(window.__almInputUnlockTimer);
+  let observedActiveState = false;
+  window.__almInputUnlockTimer = setInterval(() => {
+    const status = document.getElementById('status-display');
+    const text = status ? status.textContent : '';
+    if (text.includes('正在加载模型') || text.includes('正在启动摄像头') ||
+        text.includes('正在录制并分析') || text.includes('运行中') ||
+        text.includes('正在结束分析')) {
+      observedActiveState = true;
+      return;
+    }
+    if (!observedActiveState ||
+        (!text.includes('分析结束') && !text.includes('已停止') &&
+         !text.includes('模型加载失败'))) return;
+    clearInterval(window.__almInputUnlockTimer);
+    window.__almInputUnlockTimer = null;
+    if (app) delete app.dataset.inputLocked;
+    document.querySelectorAll('.tab-nav button').forEach(button => {
+      button.disabled = false;
+      button.removeAttribute('aria-disabled');
+    });
+  }, 200);
+  if (window.__almCameraHandoffTimer) clearInterval(window.__almCameraHandoffTimer);
+  window.__almCameraHandoffTimer = setInterval(() => {
+    const status = document.getElementById('status-display');
+    if (!status || !status.textContent.includes('正在启动摄像头')) return;
+    clearInterval(window.__almCameraHandoffTimer);
+    window.__almCameraHandoffTimer = null;
+    const video = document.getElementById('browser-camera-video');
+    const freeze = document.getElementById('browser-camera-freeze');
+    if (video && freeze && video.videoWidth > 0 && video.videoHeight > 0) {
+      freeze.width = video.videoWidth;
+      freeze.height = video.videoHeight;
+      const context = freeze.getContext('2d');
+      if (context) {
+        context.drawImage(video, 0, 0, freeze.width, freeze.height);
+        freeze.style.display = 'block';
+      }
+    }
+    if (window.__almCameraStream) {
+      window.__almCameraStream.getTracks().forEach(track => track.stop());
+      window.__almCameraStream = null;
+    }
+    // 先保留浏览器视频的最后一帧。只有 OpenCV 的第一张真实预览已经
+    // 渲染出来后才隐藏它，避免两路摄像头交接时露出白色图片占位框。
+    if (window.__almCameraFirstFrameTimer) clearInterval(window.__almCameraFirstFrameTimer);
+    window.__almCameraFirstFrameTimer = setInterval(() => {
+      const analysisFrame = document.querySelector('.analysis-camera-frame');
+      const image = analysisFrame ? analysisFrame.querySelector('img') : null;
+      const src = image ? (image.currentSrc || image.getAttribute('src') || '') : '';
+      const status = document.getElementById('status-display');
+      const isRecording = status && status.textContent.includes('正在录制并分析');
+      const isVisible = analysisFrame && getComputedStyle(analysisFrame).display !== 'none';
+      if (!isRecording || !isVisible || !image || !src || image.naturalWidth <= 0) return;
+      clearInterval(window.__almCameraFirstFrameTimer);
+      window.__almCameraFirstFrameTimer = null;
+      const shell = document.getElementById('browser-camera-shell');
+      const host = document.getElementById('camera-preview-host');
+      if (shell) shell.style.display = 'none';
+      if (host) host.style.display = 'none';
+    }, 50);
+  }, 100);
+  return [mode, videoPath];
+}"""
+
+LOCK_UPLOAD_TABS_JS = """(mode, videoPath) => {
+  if (videoPath) {
+    const app = document.querySelector('gradio-app');
+    if (app) app.dataset.inputLocked = 'true';
+    document.querySelectorAll('.tab-nav button').forEach(button => {
+      button.disabled = true;
+      button.setAttribute('aria-disabled', 'true');
+    });
+    if (window.__almInputUnlockTimer) clearInterval(window.__almInputUnlockTimer);
+    let observedActiveState = false;
+    window.__almInputUnlockTimer = setInterval(() => {
+    const status = document.getElementById('status-display');
+    const text = status ? status.textContent : '';
+    if (text.includes('正在加载模型') || text.includes('运行中') ||
+        text.includes('正在结束分析')) {
+      observedActiveState = true;
+      return;
+    }
+    if (!observedActiveState ||
+        (!text.includes('分析结束') && !text.includes('已停止') &&
+         !text.includes('模型加载失败'))) return;
+      clearInterval(window.__almInputUnlockTimer);
+      window.__almInputUnlockTimer = null;
+      if (app) delete app.dataset.inputLocked;
+      document.querySelectorAll('.tab-nav button').forEach(button => {
+        button.disabled = false;
+        button.removeAttribute('aria-disabled');
+      });
+    }, 200);
+  }
+  return [mode, videoPath];
+}"""
+
+CAMERA_STOP_ANALYSIS_JS = """() => {
   if (window.__almCameraStream) {
     window.__almCameraStream.getTracks().forEach(track => track.stop());
     window.__almCameraStream = null;
   }
   const shell = document.getElementById('browser-camera-shell');
+  const host = document.getElementById('camera-preview-host');
   if (shell) shell.style.display = 'none';
-  return [mode, videoPath];
+  if (host) host.style.display = 'none';
+  const analysisFrame = document.querySelector('.analysis-camera-frame');
+  if (analysisFrame && analysisFrame.querySelector('img')) {
+    analysisFrame.style.display = 'block';
+  }
+  return [];
 }"""
 
 CAMERA_CLOSE_JS = """() => {
@@ -653,10 +852,15 @@ def app_header() -> str:
 def status_html(state: str) -> str:
     label = {
         "idle": "待分析",
+        "loading": "正在加载模型（尚未录制）",
+        "ready": "模型已就绪",
+        "starting": "正在启动摄像头（尚未录制）",
         "run": "运行中",
+        "recording": "正在录制并分析",
         "ending": "正在结束分析",
         "stop": "已停止",
         "done": "分析结束",
+        "error": "模型加载失败",
     }[state]
     return (
         '<div class="status-line">'
@@ -667,7 +871,58 @@ def status_html(state: str) -> str:
 
 _runtime_runner = None
 _analysis_running = False
+_prepared_detector = None
+_models_ready = threading.Event()
+_model_prepare_lock = threading.Lock()
+_model_prepare_error = None
 UI_STATE_PATH = Path(PROJECT_ROOT) / "data" / "ui_state.json"
+
+
+def _prepare_models() -> None:
+    """加载一次并缓存两种输入方式共用的模型权重。"""
+    global _prepared_detector, _model_prepare_error
+    if _models_ready.is_set():
+        return
+    with _model_prepare_lock:
+        if _models_ready.is_set():
+            return
+        try:
+            if _prepared_detector is None:
+                _prepared_detector = YoloDetector(
+                    device=os.getenv("YOLO_DEVICE", "cpu"),
+                    conf_threshold=float(os.getenv("YOLO_CONFIDENCE", "0.35")),
+                )
+            # load_model 自带进程级缓存；后续每轮 EndToEndRunner 会直接复用。
+            load_model(model_path=os.getenv("QWEN_VL_MODEL_PATH"))
+        except Exception as exc:
+            _model_prepare_error = exc
+            raise
+        _model_prepare_error = None
+        _models_ready.set()
+
+
+def on_page_load():
+    """页面出现后立即预热模型，完成前禁止开始分析。"""
+    yield (
+        status_html("loading"),
+        gr.update(interactive=False),
+        gr.update(interactive=False),
+    )
+    try:
+        _prepare_models()
+    except Exception as exc:
+        gr.Warning(f"模型加载失败：{exc}")
+        yield (
+            status_html("error"),
+            gr.update(interactive=True),
+            gr.update(interactive=True),
+        )
+        return
+    yield (
+        status_html("ready"),
+        gr.update(interactive=True),
+        gr.update(interactive=True),
+    )
 
 
 # ============ 回调（后续接 A/D 真实模块） ============
@@ -753,22 +1008,20 @@ def _summary_distribution(records) -> tuple[float, list[dict]]:
             float(record.get("end_time", 0.0)) - float(record.get("start_time", 0.0)),
         )
         durations[event_type] = durations.get(event_type, 0.0) + duration
-    total = max(float(record.get("end_time", 0.0)) for record in records)
-    confirmed = sum(durations.values())
-    if total > confirmed + 0.01:
-        durations["unclassified"] = total - confirmed
-    colors = {**_SUMMARY_CHART_COLORS, "unclassified": "#cbd5e1"}
+    total = sum(durations.values())
+    colors = _SUMMARY_CHART_COLORS
     items = []
     for event_type, duration in durations.items():
         if duration <= 0 or total <= 0:
             continue
         items.append({
             "event_type": event_type,
-            "label": "未分类时段" if event_type == "unclassified" else event_label(event_type),
+            "label": event_label(event_type),
             "duration": duration,
             "percentage": duration / total * 100.0,
             "color": colors.get(event_type, "#94a3b8"),
         })
+    items.sort(key=lambda item: item["percentage"], reverse=True)
     return total, items
 
 
@@ -820,6 +1073,11 @@ def _normalize_timeline_choice_times(choices):
                         f"{_format_display_time(start_time)} – "
                         f"{_format_display_time(end_time)}"
                     )
+                    if (
+                        end_time - start_time > 60.0
+                        and not str(value).startswith("__SUMMARY_REPLAY__:")
+                    ):
+                        value = "__SUMMARY_REPLAY__:" + str(value)
         normalized.append(("\n".join(lines), value))
     return normalized
 
@@ -852,7 +1110,7 @@ def summary_html(summary: str = "", records=None) -> str:
     chart = (
         '<div class="summary-chart">'
         f'<div class="summary-pie" style="background:conic-gradient({",".join(sectors)})">'
-        '<div class="summary-pie-center"><span>总时长</span>'
+        '<div class="summary-pie-center"><span>有效总时长</span>'
         f'<strong>{_format_display_time(total)}</strong></div></div>'
         f'<div class="summary-legend">{"".join(legend)}</div></div>'
     )
@@ -869,7 +1127,11 @@ def _event_choices(records):
             f"{_format_display_time(item['start_time'])} – "
             f"{_format_display_time(item['end_time'])}\n"
             f"{item['caption']}",
-            str(item.get("video_path", "")),
+            (
+                "__SUMMARY_REPLAY__:" + str(item.get("video_path", ""))
+                if float(item.get("end_time", 0.0)) - float(item.get("start_time", 0.0)) > 60.0
+                else str(item.get("video_path", ""))
+            ),
         )
         for item in records
     ]
@@ -906,18 +1168,38 @@ def on_search(query: str):
     )
 
 
+def _replay_header(summary: bool = False) -> str:
+    if summary:
+        return section_head(
+            "REPLAY SUMMARY",
+            "事件摘要回放",
+            "该事件超过60秒，当前展示开头、中间和结尾的摘要片段。",
+        )
+    return section_head("REPLAY", "事件回放", "当前选中事件的完整视频片段")
+
+
 def on_select_event(seg_path):
     """时间线和搜索结果共用：点击事件卡片即播放。"""
     if not seg_path:
         gr.Warning("该事件没有可用的回放片段")
-        return gr.update(visible=False), gr.update(visible=False)
-    return gr.update(visible=True), gr.update(value=seg_path, visible=True)
+        return gr.update(visible=False), gr.update(visible=False), gr.update()
+    value = str(seg_path)
+    is_summary = value.startswith("__SUMMARY_REPLAY__:")
+    if is_summary:
+        value = value.removeprefix("__SUMMARY_REPLAY__:")
+        gr.Info("该事件超过60秒，当前打开的是开头、中间和结尾的摘要回放")
+    return (
+        gr.update(visible=True),
+        gr.update(value=value, visible=True),
+        gr.update(value=_replay_header(is_summary)),
+    )
 
 
 def on_close_replay():
     return (
         gr.update(visible=False),
         gr.update(value=None, visible=False),
+        gr.update(value=_replay_header()),
         gr.update(value=None),
         gr.update(value=None),
     )
@@ -1018,11 +1300,22 @@ def _preview_frame():
     return gr.update(value=frame[:, :, ::-1].copy(), visible=True)
 
 
+def _camera_recording_updates(input_mode: str):
+    if input_mode == "本机摄像头" and _runtime_runner is not None:
+        recording_path = _runtime_runner.create_full_recording()
+        if recording_path:
+            return (
+                gr.update(value=None, visible=False),
+                gr.update(value=recording_path, visible=True),
+            )
+    return _preview_frame(), gr.update(value=None, visible=False)
+
+
 def on_start(input_mode, video_path):
     global _runtime_runner, _analysis_running
     if _analysis_running:
         gr.Warning("当前分析尚未结束")
-        yield (gr.update(),) * 8
+        yield (gr.update(),) * 10
         return
     if input_mode == "上传视频" and not video_path:
         gr.Warning("请先上传一个本地视频文件")
@@ -1030,31 +1323,94 @@ def on_start(input_mode, video_path):
             status_html("idle"), summary_html(),
             gr.update(choices=[], value=None, visible=False),
             gr.update(interactive=False), gr.update(interactive=False), gr.update(),
+            gr.update(value=None, visible=False),
             gr.update(interactive=True), gr.update(interactive=True),
+            gr.update(interactive=True),
         )
         return
 
-    gr.Info("首次加载 Qwen2-VL 需要一些时间")
     source = 0 if input_mode == "本机摄像头" else str(video_path)
+    _analysis_running = True
     _persist_ui_state(
         "running",
         input_mode=input_mode,
         video_path=(str(video_path) if video_path else None),
     )
-    _runtime_runner = EndToEndRunner(
-        source=source,
-        qwen_model_path=os.getenv("QWEN_VL_MODEL_PATH"),
-        yolo_device=os.getenv("YOLO_DEVICE", "cpu"),
-        yolo_confidence=float(os.getenv("YOLO_CONFIDENCE", "0.35")),
+    if not _models_ready.is_set():
+        yield (
+            status_html("loading"), summary_html("模型正在准备，当前尚未开始录制……"),
+            gr.update(choices=[], value=None, visible=False),
+            gr.update(interactive=False), gr.update(interactive=False),
+            gr.update(value=None, visible=False),
+            gr.update(value=None, visible=False),
+            gr.update(interactive=False), gr.update(interactive=False),
+            gr.update(interactive=False),
+        )
+        try:
+            _prepare_models()
+        except Exception as exc:
+            _analysis_running = False
+            _persist_ui_state(
+                "error",
+                input_mode=input_mode,
+                video_path=(str(video_path) if video_path else None),
+                message=str(exc),
+            )
+            yield (
+                status_html("error"), summary_html(f"模型加载失败：{exc}"),
+                gr.update(choices=[], value=None, visible=False),
+                gr.update(interactive=False), gr.update(interactive=False),
+                gr.update(value=None, visible=False),
+                gr.update(value=None, visible=False),
+                gr.update(interactive=True), gr.update(interactive=True),
+                gr.update(interactive=False),
+            )
+            return
+
+    try:
+        _runtime_runner = EndToEndRunner(
+            source=source,
+            detector=_prepared_detector,
+            qwen_model_path=os.getenv("QWEN_VL_MODEL_PATH"),
+            yolo_device=os.getenv("YOLO_DEVICE", "cpu"),
+            yolo_confidence=float(os.getenv("YOLO_CONFIDENCE", "0.35")),
+        )
+    except Exception as exc:
+        _analysis_running = False
+        _persist_ui_state(
+            "error",
+            input_mode=input_mode,
+            video_path=(str(video_path) if video_path else None),
+            message=str(exc),
+        )
+        yield (
+            status_html("stop"), summary_html(f"分析启动失败：{exc}"),
+            gr.update(choices=[], value=None, visible=False),
+            gr.update(interactive=False), gr.update(interactive=False),
+            gr.update(value=None, visible=False),
+            gr.update(value=None, visible=False),
+            gr.update(interactive=True), gr.update(interactive=True),
+            gr.update(interactive=False),
+        )
+        return
+
+    initial_state = "starting" if input_mode == "本机摄像头" else "run"
+    initial_message = (
+        "模型已就绪，正在启动摄像头；第一帧写入后开始录制……"
+        if input_mode == "本机摄像头"
+        else "正在分析中，请稍后……"
     )
-    _analysis_running = True
     yield (
-        status_html("run"), summary_html("正在分析中，请稍后……"),
+        status_html(initial_state), summary_html(initial_message),
         gr.update(choices=[], value=None, visible=False),
         gr.update(interactive=False), gr.update(interactive=False),
-        gr.update(value=None),
+        gr.update(value=None, visible=False),
+        gr.update(value=None, visible=False),
         gr.update(interactive=False), gr.update(interactive=False),
+        gr.update(interactive=False),
     )
+    if input_mode == "本机摄像头":
+        time.sleep(0.6)
     result_box = {}
     error_box = {}
 
@@ -1071,18 +1427,49 @@ def on_start(input_mode, video_path):
     )
     analysis_thread.start()
     while analysis_thread.is_alive():
-        run_state = "ending" if _runtime_runner._stop_event.is_set() else "run"
+        if _runtime_runner._stop_event.is_set():
+            run_state = "ending"
+        elif input_mode == "本机摄像头":
+            run_state = (
+                "recording" if _runtime_runner.recording_started() else "starting"
+            )
+        else:
+            run_state = "run"
+        recording_is_ready = (
+            input_mode == "本机摄像头"
+            and _runtime_runner._stop_event.is_set()
+            and _runtime_runner.wait_for_recording_ready(timeout=0.0)
+        )
+        if recording_is_ready:
+            preview_update, recording_update = _camera_recording_updates(input_mode)
+        elif input_mode == "本机摄像头" and not _runtime_runner.recording_started():
+            preview_update = gr.update(value=None, visible=False)
+            recording_update = gr.update(value=None, visible=False)
+        else:
+            preview_update = _preview_frame()
+            recording_update = gr.update(value=None, visible=False)
+        progress_message = (
+            "正在结束分析，请稍后……"
+            if run_state == "ending"
+            else (
+                "模型已就绪，正在启动摄像头；第一帧写入后开始录制……"
+                if run_state == "starting"
+                else "正在分析中，请稍后……"
+            )
+        )
         yield (
-            status_html(run_state), summary_html("正在分析中，请稍后……"), gr.update(),
+            status_html(run_state), summary_html(progress_message), gr.update(),
             gr.update(interactive=False), gr.update(interactive=False),
-            _preview_frame(),
+            preview_update, recording_update,
             gr.update(interactive=False), gr.update(interactive=False),
+            gr.update(interactive=False),
         )
         time.sleep(0.25)
     analysis_thread.join()
     _analysis_running = False
     if "error" in error_box:
         exc = error_box["error"]
+        preview_update, recording_update = _camera_recording_updates(input_mode)
         _persist_ui_state(
             "error",
             input_mode=input_mode,
@@ -1093,11 +1480,13 @@ def on_start(input_mode, video_path):
             status_html("stop"), summary_html(f"分析失败：{exc}"),
             gr.update(choices=[], value=None, visible=False),
             gr.update(interactive=False), gr.update(interactive=False),
-            _preview_frame(),
+            preview_update, recording_update,
             gr.update(interactive=True), gr.update(interactive=True),
+            gr.update(interactive=False),
         )
         return
     result = result_box["result"]
+    preview_update, recording_update = _camera_recording_updates(input_mode)
     records = merge_events_for_display(_runtime_runner.memory_store.list_all())
     for record in records:
         if record["merged_event_count"] > 1:
@@ -1147,17 +1536,27 @@ def on_start(input_mode, video_path):
             ),
         ),
         gr.update(interactive=ready),
-        _preview_frame(),
+        preview_update, recording_update,
         gr.update(interactive=True), gr.update(interactive=True),
+        gr.update(interactive=False),
     )
 
 
-def on_stop() -> str:
+def on_stop():
     if _analysis_running and _runtime_runner is not None:
         _runtime_runner.stop()
         gr.Info("已请求停止，正在完成剩余分析")
-        return status_html("ending")
-    return status_html("idle")
+        if _runtime_runner.recorder is not None:
+            if _runtime_runner.wait_for_recording_ready(timeout=10.0):
+                recording_path = _runtime_runner.create_full_recording()
+                if recording_path:
+                    return (
+                        status_html("ending"),
+                        gr.update(value=None, visible=False),
+                        gr.update(value=recording_path, visible=True),
+                    )
+        return status_html("ending"), gr.update(), gr.update()
+    return status_html("idle"), gr.update(), gr.update()
 
 
 # ============ Gradio 界面 ============
@@ -1175,29 +1574,40 @@ def build_ui() -> gr.Blocks:
             empty_video = gr.State(None)
             with gr.Tabs(elem_classes=["tab-nav"]):
                 with gr.Tab("上传视频") as upload_tab:
-                    video_input = gr.Video(
-                        sources=["upload"], label=None, height=450,
-                        elem_classes=["media-frame"],
-                    )
-                    upload_start_btn = gr.Button(
-                        "开始分析", variant="primary", elem_id="upload-start-btn",
-                        elem_classes=["primary"]
-                    )
+                    with gr.Column(elem_classes=["input-mode-stack"]):
+                        video_input = gr.Video(
+                            sources=["upload"], label=None, height=450,
+                            elem_id="video-input", elem_classes=["media-frame"],
+                        )
+                        upload_start_btn = gr.Button(
+                            "开始分析", variant="primary", elem_id="upload-start-btn",
+                            elem_classes=["primary"]
+                        )
                 with gr.Tab("实时摄像头") as camera_tab:
-                    gr.HTML(
-                        '<div class="browser-camera-shell" id="browser-camera-shell">'
-                        '<video id="browser-camera-video" autoplay muted playsinline></video>'
-                        '<div class="browser-camera-empty" id="browser-camera-empty">正在打开摄像头…</div>'
-                        '</div>'
-                    )
-                    live_preview = gr.Image(
-                        label=None, interactive=False, height=450, visible=False,
-                        elem_classes=["media-frame", "analysis-camera-frame"],
-                    )
-                    camera_start_btn = gr.Button(
-                        "开始分析", variant="primary", elem_id="camera-start-btn",
-                        elem_classes=["primary"]
-                    )
+                    with gr.Column(elem_classes=["input-mode-stack"]):
+                        gr.HTML(
+                            '<div class="browser-camera-shell" id="browser-camera-shell">'
+                            '<video id="browser-camera-video" autoplay muted playsinline></video>'
+                            '<canvas id="browser-camera-freeze" aria-hidden="true"></canvas>'
+                            '<div class="browser-camera-empty" id="browser-camera-empty">正在打开摄像头…</div>'
+                            '</div>',
+                            elem_id="camera-preview-host",
+                            elem_classes=["camera-preview-host"],
+                        )
+                        live_preview = gr.Image(
+                            label=None, show_label=False, container=False,
+                            interactive=False, height=450, visible=False,
+                            elem_classes=["media-frame", "analysis-camera-frame"],
+                        )
+                        camera_recording = gr.Video(
+                            label=None, show_label=False, interactive=False,
+                            visible=False, height=450,
+                            elem_classes=["media-frame", "camera-recording"],
+                        )
+                        camera_start_btn = gr.Button(
+                            "开始分析", variant="primary", elem_id="camera-start-btn",
+                            elem_classes=["primary"]
+                        )
             with gr.Row(equal_height=True):
                 stop_btn = gr.Button("停止", elem_id="stop-btn", elem_classes=["secondary"])
                 restore_btn = gr.Button(
@@ -1242,23 +1652,27 @@ def build_ui() -> gr.Blocks:
         with gr.Group(visible=False, elem_id="replay-modal") as replay_modal:
             with gr.Column(elem_id="replay-dialog"):
                 with gr.Row():
-                    gr.HTML(section_head("REPLAY", "事件回放", "当前选中事件的视频片段"))
+                    replay_header = gr.HTML(_replay_header())
                     close_replay_btn = gr.Button(
                         "关闭", size="sm", elem_id="close-replay-btn",
                         elem_classes=["secondary"],
                     )
-                replay_video = gr.Video(label=None, interactive=False, visible=False)
+                replay_video = gr.Video(
+                    label=None, interactive=False, visible=False,
+                    elem_classes=["media-frame"],
+                )
         # ---- 事件绑定 ----
         video_input.upload(on_video_upload, inputs=video_input, outputs=video_input, show_progress="hidden")
         start_outputs = [
             status, summary_panel, timeline_list,
-            query, search_btn, live_preview,
-            upload_start_btn, camera_start_btn,
+            query, search_btn, live_preview, camera_recording,
+            upload_start_btn, camera_start_btn, restore_btn,
         ]
         upload_start_btn.click(
             on_start,
             inputs=[upload_mode, video_input],
             outputs=start_outputs,
+            js=LOCK_UPLOAD_TABS_JS,
             show_progress="hidden",
         )
         camera_tab.select(
@@ -1274,13 +1688,14 @@ def build_ui() -> gr.Blocks:
             show_progress="hidden",
         )
         upload_tab.select(
-            on_stop,
-            outputs=status,
-            queue=False,
+            fn=None,
             js=CAMERA_CLOSE_JS,
             show_progress="hidden",
         )
-        stop_btn.click(on_stop, outputs=status, queue=False, show_progress="hidden")
+        stop_btn.click(
+            on_stop, outputs=[status, live_preview, camera_recording], queue=False,
+            js=CAMERA_STOP_ANALYSIS_JS, show_progress="hidden",
+        )
         search_btn.click(
             on_search,
             inputs=query,
@@ -1296,18 +1711,18 @@ def build_ui() -> gr.Blocks:
         timeline_list.input(
             on_select_event,
             inputs=timeline_list,
-            outputs=[replay_modal, replay_video],
+            outputs=[replay_modal, replay_video, replay_header],
             show_progress="hidden",
         )
         search_results.input(
             on_select_event,
             inputs=search_results,
-            outputs=[replay_modal, replay_video],
+            outputs=[replay_modal, replay_video, replay_header],
             show_progress="hidden",
         )
         close_replay_btn.click(
             on_close_replay,
-            outputs=[replay_modal, replay_video, timeline_list, search_results],
+            outputs=[replay_modal, replay_video, replay_header, timeline_list, search_results],
             show_progress="hidden",
             queue=False,
         )
@@ -1316,6 +1731,11 @@ def build_ui() -> gr.Blocks:
             query, search_btn, video_input,
         ]
         restore_btn.click(on_restore, outputs=restore_outputs, show_progress="hidden")
+        demo.load(
+            on_page_load,
+            outputs=[status, upload_start_btn, camera_start_btn],
+            show_progress="hidden",
+        )
 
     return demo
 

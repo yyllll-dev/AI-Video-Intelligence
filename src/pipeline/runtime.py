@@ -281,6 +281,12 @@ class EndToEndRunner:
 
         self._is_realtime = is_camera
         self._stop_event = threading.Event()
+        # 以“第一帧已经真正写入录像”为录制起点。界面不能仅凭分析线程
+        # 已启动就显示正在录制，否则模型/摄像头初始化阶段会被误认为录像时间。
+        self._recording_started = threading.Event()
+        self._recording_ready = threading.Event()
+        self._full_recording_lock = threading.Lock()
+        self._full_recording_path = ""
         self._active_stream: Optional[FrameStream] = None
 
     def _ensure_event_analyzer(self) -> Optional[EventAnalyzer]:
@@ -1092,6 +1098,31 @@ class EndToEndRunner:
         except Exception as exc:
             self.errors.append(f"生成 {start_time:.2f}s-{end_time:.2f}s 回放失败: {exc}")
         return ""
+
+    def create_full_recording(self) -> str:
+        """导出实时摄像头本轮分析的完整录像，供界面停止后回看。"""
+        if self.recorder is None:
+            return ""
+        with self._full_recording_lock:
+            if self._full_recording_path and Path(self._full_recording_path).is_file():
+                return self._full_recording_path
+            try:
+                self.recorder.flush()
+                self._full_recording_path = self.replay_exporter.export_full_recording(
+                    self.recorder.segments
+                )
+                return self._full_recording_path
+            except Exception as exc:
+                self.errors.append(f"生成完整摄像头录像失败: {exc}")
+                return ""
+
+    def wait_for_recording_ready(self, timeout: float = 10.0) -> bool:
+        """等待摄像头停止采集并关闭录像分段，不等待后续语义总结。"""
+        return self._recording_ready.wait(max(0.0, float(timeout)))
+
+    def recording_started(self) -> bool:
+        """摄像头第一帧成功写入录像后返回 True。"""
+        return self._recording_started.is_set()
 
     def _should_refine_window(
         self,
@@ -2635,6 +2666,7 @@ class EndToEndRunner:
 
                 if self.recorder is not None:
                     self.recorder.add_frame(video_frame.frame, video_frame.timestamp)
+                    self._recording_started.set()
                 self._store_buffer_frame(video_frame)
 
                 if (
@@ -2656,6 +2688,9 @@ class EndToEndRunner:
         finally:
             if owns_source:
                 source.release()
+            if self.recorder is not None:
+                self.recorder.close()
+            self._recording_ready.set()
             frame_queue.put(frame_sentinel)
             worker.join()
             # Detection/Event 已停止产生新事件，再等待全部 VLM 任务完成。
@@ -2681,6 +2716,8 @@ class EndToEndRunner:
         max_duration: Optional[float] = None,
     ) -> dict[str, Any]:
         self._stop_event.clear()
+        self._recording_started.clear()
+        self._recording_ready.clear()
         if self._is_realtime:
             stats = self._run_realtime(
                 max_frames=max_frames,
@@ -2706,6 +2743,7 @@ class EndToEndRunner:
         finally:
             if self.recorder is not None:
                 self.recorder.close()
+                self._recording_ready.set()
 
         self.video_summary = self._generate_video_summary()
 

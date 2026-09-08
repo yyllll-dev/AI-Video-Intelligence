@@ -1,0 +1,25 @@
+# VisionOracle runtime dependencies
+# Verified with Python 3.11.15 on Windows.
+#
+# PyTorch wheels depend on the target hardware. The versions below describe
+# the tested public versions. For a specific CUDA or CPU wheel, install
+# torch/torchvision first with the command in README.md, then install this file.
+
+torch==2.11.0
+torchvision==0.26.0
+
+gradio==6.26.0
+huggingface-hub==1.29.0
+modelscope==1.39.1
+transformers==5.16.1
+accelerate==1.14.0
+safetensors==0.8.0
+qwen-vl-utils==0.0.14
+
+ultralytics==8.4.140
+opencv-python==5.0.0.93
+numpy==2.4.6
+Pillow==12.3.0
+
+# Supplies a bundled FFmpeg executable for MP4 conversion and replay.
+imageio-ffmpeg==0.6.0

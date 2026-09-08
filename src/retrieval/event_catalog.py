@@ -39,6 +39,7 @@ EVENT_SEARCH_TERMS: dict[str, EventSearchTerms] = {
     "phone_usage": EventSearchTerms(
         "使用手机",
         (
+            "手机",
             "使用手机",
             "看手机",
             "玩手机",

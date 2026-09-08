@@ -20,6 +20,57 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _BROWSER_CODECS = {"avc1", "h264", "x264"}
 
 
+def _ffmpeg_executable() -> str:
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except ImportError:
+        return shutil.which("ffmpeg") or ""
+
+
+def _mux_source_audio(
+    video_path: Path,
+    source_path: str | Path,
+    ranges: list[tuple[float, float]],
+) -> None:
+    """将源文件对应时间段的音轨拼接进已生成的无声回放视频。"""
+    ffmpeg = _ffmpeg_executable()
+    if not ffmpeg or not video_path.exists() or not ranges:
+        return
+    audio_parts = []
+    labels = []
+    for index, (start_time, end_time) in enumerate(ranges):
+        label = f"a{index}"
+        audio_parts.append(
+            f"[1:a:0]atrim=start={max(0.0, start_time):.6f}:"
+            f"end={max(start_time, end_time):.6f},asetpts=PTS-STARTPTS[{label}]"
+        )
+        labels.append(f"[{label}]")
+    if len(labels) == 1:
+        audio_filter = ";".join(audio_parts) + f";{labels[0]}anull[aout]"
+    else:
+        audio_filter = (
+            ";".join(audio_parts)
+            + f";{''.join(labels)}concat=n={len(labels)}:v=0:a=1[aout]"
+        )
+    muxed_path = video_path.with_name(f"{video_path.stem}_audio{video_path.suffix}")
+    command = [
+        ffmpeg, "-y", "-i", str(video_path), "-i", str(source_path),
+        "-filter_complex", audio_filter,
+        "-map", "0:v:0", "-map", "[aout]",
+        "-c:v", "copy", "-c:a", "aac", "-shortest",
+        "-movflags", "+faststart", str(muxed_path),
+    ]
+    result = subprocess.run(
+        command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False
+    )
+    if result.returncode == 0 and muxed_path.exists() and muxed_path.stat().st_size > 0:
+        os.replace(muxed_path, video_path)
+    elif muxed_path.exists():
+        muxed_path.unlink()
+
+
 def _uniform_times(start_time: float, end_time: float, count: int) -> list[float]:
     if count <= 1 or end_time <= start_time:
         return [start_time]
@@ -139,6 +190,54 @@ def _open_browser_writer(path: Path, fps: float, frame: np.ndarray):
         writer.release()
         return _FfmpegWriter(path, fps, width, height)
     return writer
+
+
+def _retime_video(path: Path, encoded_fps: float, actual_fps: float) -> None:
+    """保持帧数不变，仅按实际采集 FPS 调整视频播放时间基准。"""
+    encoded_fps = max(float(encoded_fps), 1.0)
+    actual_fps = max(float(actual_fps), 1.0)
+    if abs(encoded_fps - actual_fps) / encoded_fps < 0.01:
+        return
+    ffmpeg = _ffmpeg_executable()
+    temporary_path = path.with_name(f"{path.stem}_retimed{path.suffix}")
+    if ffmpeg:
+        scale = encoded_fps / actual_fps
+        result = subprocess.run(
+            [
+                ffmpeg, "-y", "-itsscale", f"{scale:.9f}", "-i", str(path),
+                "-map", "0:v:0", "-an", "-c:v", "copy",
+                "-movflags", "+faststart", str(temporary_path),
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if (
+            result.returncode == 0
+            and temporary_path.exists()
+            and temporary_path.stat().st_size > 0
+        ):
+            os.replace(temporary_path, path)
+            return
+        if temporary_path.exists():
+            temporary_path.unlink()
+
+    capture = cv2.VideoCapture(str(path))
+    writer = None
+    try:
+        while True:
+            ok, frame = capture.read()
+            if not ok or frame is None:
+                break
+            if writer is None:
+                writer = _open_browser_writer(temporary_path, actual_fps, frame)
+            writer.write(frame)
+    finally:
+        capture.release()
+        if writer is not None:
+            writer.release()
+    if temporary_path.exists() and temporary_path.stat().st_size > 0:
+        os.replace(temporary_path, path)
 
 
 def video_codec(path: str | Path) -> str:
@@ -279,10 +378,14 @@ class VideoClipExporter:
         ]
 
     def export_file(self, source_path: str | Path, start_time: float, end_time: float) -> str:
-        return self._export_sources(
+        ranges = self._ranges(start_time, end_time)
+        replay_path = self._export_sources(
             [(str(source_path), 0.0, float("inf"))],
-            self._ranges(start_time, end_time),
+            ranges,
         )
+        if replay_path:
+            _mux_source_audio(Path(replay_path), source_path, ranges)
+        return replay_path
 
     def export_segments(
         self,
@@ -292,6 +395,16 @@ class VideoClipExporter:
     ) -> str:
         sources = [(item.path, item.start_time, item.end_time) for item in segments]
         return self._export_sources(sources, self._ranges(start_time, end_time))
+
+    def export_full_recording(self, segments: list[RecordingSegment]) -> str:
+        """按时间顺序导出摄像头从开始分析到停止的完整录像。"""
+        if not segments:
+            return ""
+        ordered = sorted(segments, key=lambda item: item.start_time)
+        sources = [(item.path, item.start_time, item.end_time) for item in ordered]
+        start_time = ordered[0].start_time
+        end_time = ordered[-1].end_time
+        return self._export_sources(sources, [(start_time, end_time)])
 
     def _export_sources(
         self,
@@ -372,13 +485,14 @@ class RollingVideoRecorder:
         self._last_timestamp: Optional[float] = None
         self._last_written: Optional[float] = None
         self._segment_index = 0
+        self._segment_frame_count = 0
         self._lock = threading.RLock()
 
     def add_frame(self, frame: np.ndarray, timestamp: float) -> None:
         with self._lock:
             if (
                 self._last_written is not None
-                and timestamp - self._last_written < 1.0 / self.fps
+                and timestamp - self._last_written < 1.0 / max(self.fps, 1.0)
             ):
                 return
             if (
@@ -392,6 +506,7 @@ class RollingVideoRecorder:
             if self._writer is None:
                 self._open_segment(frame, timestamp)
             self._writer.write(frame)
+            self._segment_frame_count += 1
             self._last_timestamp = float(timestamp)
             self._last_written = float(timestamp)
 
@@ -401,22 +516,29 @@ class RollingVideoRecorder:
         self._segment_path = self.session_dir / f"chunk_{self._segment_index:05d}.mp4"
         self._writer = _open_browser_writer(self._segment_path, self.fps, frame)
         self._segment_start = float(timestamp)
+        self._segment_frame_count = 0
 
     def _close_segment(self) -> None:
         if self._writer is None:
             return
         self._writer.release()
         if self._segment_path is not None and self._segment_start is not None:
+            elapsed = max(0.0, (self._last_timestamp or self._segment_start) - self._segment_start)
+            actual_fps = self.fps
+            if self._segment_frame_count > 1 and elapsed > 0:
+                actual_fps = (self._segment_frame_count - 1) / elapsed
+            _retime_video(self._segment_path, self.fps, actual_fps)
             self.segments.append(
                 RecordingSegment(
                     path=str(self._segment_path.resolve()),
                     start_time=self._segment_start,
-                    end_time=self._last_timestamp or self._segment_start,
+                    end_time=self._segment_start + self._segment_frame_count / max(actual_fps, 1.0),
                 )
             )
         self._writer = None
         self._segment_path = None
         self._segment_start = None
+        self._segment_frame_count = 0
 
     def flush(self) -> None:
         with self._lock:
