@@ -1,0 +1,160 @@
+{
+  "schema_version": 1,
+  "status": "success",
+  "started_at_utc": "2026-09-08T19:45:26.823223+00:00",
+  "protocol": {
+    "measured_runs": 1,
+    "full_video_warmup_runs": 0,
+    "models_loaded_before_e2e_timer": true
+  },
+  "video": {
+    "file_name": "radio.mp4",
+    "sha256": "d799965a279e29f25324d36d2c4d366a6876603ae646992623d293d950bae44f",
+    "size_bytes": 1373841,
+    "width": 1280,
+    "height": 720,
+    "resolution": "1280x720",
+    "fps": 24.0,
+    "frame_count": 361,
+    "duration_seconds": 15.041666666666666,
+    "codec": "h264"
+  },
+  "completed_at_utc": "2026-09-08T20:05:25.351185+00:00",
+  "model_load": {
+    "yolo_seconds": 0.8269056999997701,
+    "qwen_seconds": 3.694806300001801,
+    "included_in_e2e": false
+  },
+  "environment": {
+    "collected_at_utc": "2026-09-08T19:45:26.7173576Z",
+    "computer_name": "FENGHE",
+    "cpu": {
+      "names": [
+        "Intel(R) Core(TM) i9-14900HX"
+      ],
+      "physical_cores": 24,
+      "logical_threads": 32
+    },
+    "gpu": {
+      "names": [
+        "Intel(R) UHD Graphics",
+        "NVIDIA GeForce RTX 4060 Laptop GPU"
+      ]
+    },
+    "npu": {
+      "names": [
+        "Microsoft Input Configuration Device"
+      ],
+      "detected": true
+    },
+    "memory": {
+      "total_bytes": 34053414912,
+      "total_gib": 31.71
+    },
+    "operating_system": {
+      "caption": "Microsoft Windows 11 家庭版 中文版",
+      "version": "10.0.26200",
+      "build_number": "26200",
+      "architecture": "64 位"
+    },
+    "power_plan": "电源方案 GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (平衡)",
+    "python": {
+      "version": "3.11.16",
+      "executable": "C:\\Users\\fengh\\miniconda3\\envs\\multimodal\\python.exe"
+    },
+    "software": {
+      "torch": "2.11.0",
+      "transformers": "5.16.1",
+      "ultralytics": "8.4.140",
+      "opencv-python": "5.0.0.93",
+      "gradio": "6.26.0",
+      "psutil": "7.2.2",
+      "openvino": "2026.3.1"
+    },
+    "git_commit": "c608aae52dad81ecdbee5e7fcda14e6291396054",
+    "inference": {
+      "analysis_fps": 4.0,
+      "buffer_fps": 4.0,
+      "keyframe_count": 9,
+      "yolo_confidence": 0.35,
+      "yolo_requested_device": "intel:gpu",
+      "yolo_device": "intel:gpu",
+      "yolo_backend": "openvino",
+      "yolo_model_path": "D:\\AI-Project\\AI-Video-Intelligence\\models\\yolo11n_openvino_model",
+      "yolo_dtype": "fp16",
+      "openvino_available_devices": [
+        "CPU",
+        "GPU.0",
+        "GPU.1"
+      ],
+      "qwen_model": "Qwen/Qwen2-VL-2B-Instruct",
+      "qwen_dtype": "bfloat16",
+      "qwen_devices": [
+        "cpu"
+      ],
+      "torch_cuda_available": false
+    }
+  },
+  "pipeline": {
+    "analysis_fps": 4.0,
+    "buffer_fps": 4.0,
+    "keyframe_count": 9,
+    "yolo_confidence": 0.35,
+    "yolo_requested_device": "intel:gpu",
+    "yolo_device": "intel:gpu",
+    "yolo_backend": "openvino",
+    "yolo_model_path": "D:\\AI-Project\\AI-Video-Intelligence\\models\\yolo11n_openvino_model",
+    "yolo_dtype": "fp16",
+    "openvino_available_devices": [
+      "CPU",
+      "GPU.0",
+      "GPU.1"
+    ],
+    "qwen_model": "Qwen/Qwen2-VL-2B-Instruct",
+    "qwen_dtype": "bfloat16",
+    "qwen_devices": [
+      "cpu"
+    ],
+    "torch_cuda_available": false
+  },
+  "metrics": {
+    "e2e_latency_seconds": 1194.0019107999979,
+    "video_processing_fps": 0.3023445747738586,
+    "pipeline_analysis_throughput_fps": 0.0510886954604027,
+    "realtime_factor": 0.012597690615577441,
+    "seconds_per_video_second": 79.37962841883643,
+    "processed_frames": 361.0,
+    "analysis_frames": 61,
+    "yolo_latency": {
+      "calls": 61,
+      "mean_seconds": 0.025165313116482794,
+      "median_seconds": 0.01706719999492634,
+      "p95_seconds": 0.02194479999889154,
+      "max_seconds": 0.5064931999950204
+    },
+    "resources": {
+      "sample_count": 2276,
+      "sample_interval_seconds": 0.5,
+      "process_cpu_mean_percent": 2163.4706502636204,
+      "process_cpu_peak_percent": 2478.1,
+      "system_cpu_mean_percent": 73.65773286467487,
+      "system_cpu_peak_percent": 96.7,
+      "process_memory_mean_gib": 5.1022514417008065,
+      "process_memory_peak_gib": 5.430244445800781
+    }
+  },
+  "application_result": {
+    "events_detected": 6,
+    "memories_saved": 6,
+    "vlm_calls": {
+      "main": 3,
+      "boundary": 0,
+      "position": 3,
+      "window_label": 6,
+      "transition_frame": 4,
+      "summary": 0,
+      "total": 16
+    },
+    "errors": []
+  }
+}

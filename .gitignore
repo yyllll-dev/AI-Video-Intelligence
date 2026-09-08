@@ -19,6 +19,7 @@ data/
 debug_logs/
 result*.txt
 test_output/
+tmp/
 
 # Local model weights and caches
 models/*.pt

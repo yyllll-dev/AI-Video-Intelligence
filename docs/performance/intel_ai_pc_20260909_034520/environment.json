@@ -1,0 +1,70 @@
+{
+  "collected_at_utc": "2026-09-08T19:45:26.7173576Z",
+  "computer_name": "FENGHE",
+  "cpu": {
+    "names": [
+      "Intel(R) Core(TM) i9-14900HX"
+    ],
+    "physical_cores": 24,
+    "logical_threads": 32
+  },
+  "gpu": {
+    "names": [
+      "Intel(R) UHD Graphics",
+      "NVIDIA GeForce RTX 4060 Laptop GPU"
+    ]
+  },
+  "npu": {
+    "names": [
+      "Microsoft Input Configuration Device"
+    ],
+    "detected": true
+  },
+  "memory": {
+    "total_bytes": 34053414912,
+    "total_gib": 31.71
+  },
+  "operating_system": {
+    "caption": "Microsoft Windows 11 家庭版 中文版",
+    "version": "10.0.26200",
+    "build_number": "26200",
+    "architecture": "64 位"
+  },
+  "power_plan": "电源方案 GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (平衡)",
+  "python": {
+    "version": "3.11.16",
+    "executable": "C:\\Users\\fengh\\miniconda3\\envs\\multimodal\\python.exe"
+  },
+  "software": {
+    "torch": "2.11.0",
+    "transformers": "5.16.1",
+    "ultralytics": "8.4.140",
+    "opencv-python": "5.0.0.93",
+    "gradio": "6.26.0",
+    "psutil": "7.2.2",
+    "openvino": "2026.3.1"
+  },
+  "git_commit": "c608aae52dad81ecdbee5e7fcda14e6291396054",
+  "inference": {
+    "analysis_fps": 4.0,
+    "buffer_fps": 4.0,
+    "keyframe_count": 9,
+    "yolo_confidence": 0.35,
+    "yolo_requested_device": "intel:gpu",
+    "yolo_device": "intel:gpu",
+    "yolo_backend": "openvino",
+    "yolo_model_path": "D:\\AI-Project\\AI-Video-Intelligence\\models\\yolo11n_openvino_model",
+    "yolo_dtype": "fp16",
+    "openvino_available_devices": [
+      "CPU",
+      "GPU.0",
+      "GPU.1"
+    ],
+    "qwen_model": "Qwen/Qwen2-VL-2B-Instruct",
+    "qwen_dtype": "bfloat16",
+    "qwen_devices": [
+      "cpu"
+    ],
+    "torch_cuda_available": false
+  }
+}

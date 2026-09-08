@@ -4,6 +4,17 @@ VisionOracle 是一套面向学习场景的本地视频事件理解与检索系�
 
 项目默认在本地完成视频读取、关键帧提取、目标检测、事件判断、录像归档和检索，不需要把用户视频上传到第三方推理服务。首次运行时如未指定本地 Qwen 模型目录，程序会通过 ModelScope 下载模型文件。
 
+> **比赛评审入口：** 请先阅读 [`SUBMISSION_INDEX.md`](SUBMISSION_INDEX.md)。该文件集中列出最终 PDF、运行说明、模型来源、应用价值、AI PC 部署方案、性能结果、原始证据和千问协助答题部分沟通截图。
+
+## 项目亮点
+
+- **完整产品闭环：** 不止输出识别标签，而是形成“视频输入—事件理解—时间线—有效时长—自然语言检索—证据回放”的完整链路。
+- **双输入统一体验：** 上传视频与实时摄像头复用同一套事件协议、时间轴和结果界面，摄像头停止后生成从开始到停止的完整 MP4。
+- **分层多模型协同：** YOLO11n 负责轻量视觉感知，跟踪与规则负责候选事件，Qwen2-VL 负责关键帧语义确认，避免把每一帧都交给大模型。
+- **结果可解释、可核验：** 每个事件都有明确起止时间、客观描述和可点击回放，用户可以直接回到原视频验证模型判断。
+- **端侧隐私与 AI PC 适配：** 模型和视频分析可在本机完成；YOLO 已支持 OpenVINO FP16 Intel GPU 路径，同时保留 CPU 与 NVIDIA CUDA 路径。
+- **工程完整性：** 包含一键启动、模型预热、设备检查、录像归档、摘要回放、性能测试、原始证据哈希和完整比赛文档。
+
 ## 1. 核心能力
 
 - 支持本地视频上传与电脑摄像头实时分析。
@@ -39,11 +50,21 @@ YOLO 只提供人物、桌椅、书本、手机、电脑、键盘和鼠标等物
 
 ```text
 AI-Video-Intelligence/
+├── SUBMISSION_INDEX.md         # 比赛评审材料总入口
 ├── demo/
 │   ├── app.py                 # Gradio Web 应用入口
 │   └── core/                  # 页面事件名称、状态保存与日志工具
 ├── models/
 │   └── yolo11n.pt             # YOLO11n 本地权重
+├── docs/
+│   ├── MODELS.md              # AI 模型与来源
+│   ├── SCENARIOS_AND_VALUE.md # 应用场景与用户价值
+│   ├── PERFORMANCE_TEST.md     # Intel AI PC 真实性能结果
+│   ├── AI_PC_DEPLOYMENT_AND_OPTIMIZATION.md # 本地部署与优化方案
+│   ├── performance/            # Intel AI PC 原始性能证据
+│   └── evidence/qianwen/       # 千问协助答题部分沟通截图
+├── output/pdf/
+│   └── VisionOracle_Project_Manual.pdf # 最终项目说明书
 ├── src/
 │   ├── detection/             # 视频源与 YOLO 检测
 │   ├── event/                 # 事件协议、规则与状态机

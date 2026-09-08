@@ -1,0 +1,2 @@
+﻿status,video_file,video_duration_seconds,video_resolution,video_source_fps,yolo_backend,yolo_device,yolo_precision,e2e_latency_seconds,video_processing_fps,pipeline_analysis_throughput_fps,realtime_factor,process_cpu_mean_percent,process_cpu_peak_percent,process_memory_mean_gib,process_memory_peak_gib,analysis_frames,vlm_calls_total,errors_count
+success,radio.mp4,15.041666666666666,1280x720,24.0,openvino,intel:gpu,fp16,1194.0019107999979,0.3023445747738586,0.0510886954604027,0.012597690615577441,2163.4706502636204,2478.1,5.1022514417008065,5.430244445800781,61,16,0

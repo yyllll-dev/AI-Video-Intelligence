@@ -46,8 +46,8 @@ try {
     $npuNames = @(
         Get-PnpDevice -PresentOnly -ErrorAction Stop |
             Where-Object {
-                $_.FriendlyName -match "NPU|Neural Processing|AI Boost" -or
-                $_.InstanceId -match "NPU|VPU"
+                $_.FriendlyName -match '(?i)\bNPU\b|Neural Processing|AI Boost' -or
+                $_.InstanceId -match '(?i)(^|[\\&#_-])(NPU|VPU)([\\&#_-]|$)'
             } |
             ForEach-Object { $_.FriendlyName }
     )
