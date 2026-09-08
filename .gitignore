@@ -262,3 +262,5 @@ data/previews/
 data/replays/
 data/recordings/
 debug_logs/
+/Ultralytics/
+/test_output/

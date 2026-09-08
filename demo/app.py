@@ -3,6 +3,7 @@
 import os
 import sys
 import html
+import re
 import threading
 import time
 from datetime import datetime
@@ -33,6 +34,52 @@ from core import (
 )
 from core.ui_state import load_ui_state, save_ui_state
 from core.utf8_tee import configure_utf8_tee
+
+
+# 展示页始终使用同一套浅色视觉。Gradio 6 会跟随系统深色模式读取
+# ``*_dark`` 变量，因此普通和 dark 变量必须同时设置。
+APP_THEME = gr.themes.Soft(primary_hue="blue", neutral_hue="slate").set(
+    body_background_fill="#f5f7ff",
+    body_background_fill_dark="#f5f7ff",
+    body_text_color="#0f172a",
+    body_text_color_dark="#0f172a",
+    body_text_color_subdued="#64748b",
+    body_text_color_subdued_dark="#64748b",
+    background_fill_primary="#ffffff",
+    background_fill_primary_dark="#ffffff",
+    background_fill_secondary="#f8faff",
+    background_fill_secondary_dark="#f8faff",
+    block_background_fill="#ffffff",
+    block_background_fill_dark="#ffffff",
+    block_border_color="#cbd5e1",
+    block_border_color_dark="#cbd5e1",
+    block_label_background_fill="#eef2ff",
+    block_label_background_fill_dark="#eef2ff",
+    block_label_text_color="#334155",
+    block_label_text_color_dark="#334155",
+    input_background_fill="#ffffff",
+    input_background_fill_dark="#ffffff",
+    input_background_fill_focus="#ffffff",
+    input_background_fill_focus_dark="#ffffff",
+    input_border_color="#cbd5e1",
+    input_border_color_dark="#cbd5e1",
+    input_placeholder_color="#64748b",
+    input_placeholder_color_dark="#64748b",
+    button_primary_text_color="#ffffff",
+    button_primary_text_color_dark="#ffffff",
+    button_secondary_background_fill="#ffffff",
+    button_secondary_background_fill_dark="#ffffff",
+    button_secondary_text_color="#4338ca",
+    button_secondary_text_color_dark="#4338ca",
+    checkbox_label_background_fill="#ffffff",
+    checkbox_label_background_fill_dark="#ffffff",
+    checkbox_label_background_fill_hover="#f5f3ff",
+    checkbox_label_background_fill_hover_dark="#f5f3ff",
+    checkbox_label_background_fill_selected="#eef2ff",
+    checkbox_label_background_fill_selected_dark="#eef2ff",
+    checkbox_label_text_color="#172554",
+    checkbox_label_text_color_dark="#172554",
+)
 
 # ============ SVG 图标（Lucide 风格，内联 stroke 图标） ============
 
@@ -205,10 +252,24 @@ button.btn-secondary:hover { background: var(--alm-brand-soft) !important; }
 
 
 PRESENTATION_CSS = """
-.gradio-container { max-width: 1180px !important; padding: 30px 28px 64px !important;
+html, body { min-height:100%; margin:0 !important; background:#f5f7ff !important; }
+html { color-scheme:light !important; }
+body { overflow-x:hidden; color:#0f172a !important; }
+.gradio-container,
+body > gradio-app .gradio-container,
+gradio-app .gradio-container {
+  width:min(1180px,calc(100% - 32px)) !important;
+  max-width:1180px !important;
+  min-width:0 !important;
+  margin:0 auto !important;
+  padding:30px 28px 64px !important;
+  box-sizing:border-box !important;
   background:radial-gradient(circle at 8% 0%,rgba(124,58,237,.16),transparent 31%),
   radial-gradient(circle at 94% 9%,rgba(14,165,233,.15),transparent 29%),
   linear-gradient(145deg,#f8faff 0%,#f5f3ff 48%,#f0f9ff 100%) !important; }
+.gradio-container > main,
+.gradio-container > .main,
+.gradio-container .contain { width:100% !important; max-width:none !important; margin-inline:auto !important; }
 .app-header { justify-content:space-between !important; padding:18px 4px 26px !important;
   border-bottom:1px solid transparent !important;
   border-image:linear-gradient(90deg,rgba(99,102,241,.38),rgba(14,165,233,.18),transparent) 1 !important; }
@@ -217,8 +278,7 @@ PRESENTATION_CSS = """
   background:linear-gradient(135deg,#7c3aed 0%,#4f46e5 48%,#0ea5e9 100%) !important;
   box-shadow:0 13px 32px rgba(79,70,229,.30); }
 .app-title { font-size:24px !important; font-weight:800 !important; letter-spacing:-.5px;
-  background:linear-gradient(90deg,#312e81,#5b21b6 55%,#0369a1); color:transparent !important;
-  -webkit-background-clip:text; background-clip:text; }
+  color:#312e81 !important; -webkit-text-fill-color:#312e81 !important; }
 .judge-pill { padding:8px 12px; border:1px solid rgba(79,70,229,.18); border-radius:999px;
   background:linear-gradient(135deg,rgba(238,242,255,.96),rgba(240,249,255,.92));
   color:#4338ca; font-size:12px; font-weight:700; box-shadow:0 7px 20px rgba(79,70,229,.09); }
@@ -237,9 +297,33 @@ PRESENTATION_CSS = """
   background:linear-gradient(135deg,#eef2ff 0%,#f5f3ff 48%,#ecfeff 100%);
   box-shadow:inset 0 1px 0 rgba(255,255,255,.85); color:#1e293b; font-size:15px; line-height:1.9; }
 .summary-empty { color:#94a3b8; }
+.summary-layout { display:grid; grid-template-columns:minmax(0,1fr) 465px; gap:30px; align-items:center; }
+.summary-layout.no-chart { grid-template-columns:minmax(0,1fr); }
+.summary-copy { color:#1e293b; font-size:15px; line-height:1.95; }
+.summary-chart { display:flex; align-items:center; justify-content:flex-end; gap:20px;
+  padding-left:22px; border-left:1px solid rgba(99,102,241,.16); }
+.summary-pie { position:relative; width:148px; height:148px; border-radius:50%; flex:0 0 148px;
+  box-shadow:0 10px 28px rgba(49,46,129,.16); }
+.summary-pie::after { content:""; position:absolute; inset:31px; border-radius:50%;
+  background:#f8faff; box-shadow:inset 0 0 0 1px rgba(199,210,254,.72); }
+.summary-pie-center { position:absolute; inset:31px; z-index:1; display:flex; flex-direction:column;
+  align-items:center; justify-content:center; color:#64748b; font-size:11px; line-height:1.35; text-align:center; }
+.summary-pie-center strong { color:#312e81; font-size:17px; }
+.summary-legend { display:flex; min-width:255px; flex:1 1 auto; flex-direction:column; gap:7px; }
+.summary-legend-item { display:grid;
+  grid-template-columns:9px minmax(92px,1fr) 58px minmax(62px,auto); gap:7px;
+  align-items:center; color:#475569; font-size:12px; line-height:1.35; }
+.summary-legend-item > span { min-width:0; white-space:nowrap; text-align:left; }
+.summary-legend-dot { width:9px; height:9px; border-radius:50%; }
+.summary-legend-percentage, .summary-legend-duration { color:#312e81; font-weight:700;
+  font-variant-numeric:tabular-nums; text-align:left !important; }
 .tab-nav { padding:4px !important; border-radius:13px !important; background:linear-gradient(90deg,#eef2ff,#f0f9ff) !important; }
-.tab-nav button { border-radius:10px !important; color:#64748b !important; font-weight:700 !important; }
-.tab-nav button.selected { color:#4338ca !important; background:linear-gradient(135deg,#fff,#f5f3ff) !important;
+.tab-nav button { min-height:44px !important; border-radius:10px !important; color:#475569 !important;
+  -webkit-text-fill-color:#475569 !important; font-size:15px !important;
+  font-weight:750 !important; opacity:1 !important; }
+.tab-nav button.selected, .tab-nav button[aria-selected="true"] {
+  color:#4338ca !important; -webkit-text-fill-color:#4338ca !important;
+  background:linear-gradient(135deg,#fff,#f5f3ff) !important;
   box-shadow:0 5px 15px rgba(79,70,229,.12) !important; }
 button.primary, button.btn-primary { border:0 !important; color:#fff !important;
   background:linear-gradient(100deg,#7c3aed,#4f46e5 52%,#0284c7) !important;
@@ -247,18 +331,159 @@ button.primary, button.btn-primary { border:0 !important; color:#fff !important;
 button.primary:hover, button.btn-primary:hover { transform:translateY(-1px); box-shadow:0 12px 28px rgba(79,70,229,.29) !important; }
 button.secondary { border-color:#c7d2fe !important; color:#4338ca !important; background:linear-gradient(135deg,#fff,#f5f3ff) !important; }
 button.secondary:hover { border-color:#818cf8 !important; background:linear-gradient(135deg,#f5f3ff,#eff6ff) !important; }
+/* Gradio 6 将 elem_id 放在组件外壳上，按钮文字又可能包在 span 中。
+   同时覆盖外壳、button 和内部文字，避免主题升级后文字变成白色或透明。 */
+#upload-start-btn button, button#upload-start-btn,
+#camera-start-btn button, button#camera-start-btn,
+#search-btn button, button#search-btn {
+  color:#fff !important; -webkit-text-fill-color:#fff !important;
+  background:linear-gradient(100deg,#7c3aed,#4f46e5 52%,#0284c7) !important;
+  border:0 !important; font-weight:700 !important;
+}
+#upload-start-btn, #camera-start-btn, #stop-btn, #restore-btn {
+  min-height:52px !important; height:52px !important;
+}
+#upload-start-btn button, button#upload-start-btn,
+#camera-start-btn button, button#camera-start-btn,
+#stop-btn button, button#stop-btn,
+#restore-btn button, button#restore-btn {
+  min-height:52px !important; height:52px !important; font-size:16px !important;
+}
+#stop-btn button, button#stop-btn,
+#restore-btn button, button#restore-btn,
+#close-replay-btn button, button#close-replay-btn {
+  color:#4338ca !important; -webkit-text-fill-color:#4338ca !important;
+  background:linear-gradient(135deg,#fff,#f5f3ff) !important;
+  border:1px solid #c7d2fe !important; font-weight:700 !important;
+}
+#upload-start-btn button *, #camera-start-btn button *, #search-btn button *,
+#stop-btn button *, #restore-btn button *, #close-replay-btn button *,
+button#upload-start-btn *, button#camera-start-btn *, button#search-btn *,
+button#stop-btn *, button#restore-btn *, button#close-replay-btn * {
+  color:inherit !important; -webkit-text-fill-color:currentColor !important;
+  opacity:1 !important; visibility:visible !important;
+}
+#upload-start-btn button:disabled, #camera-start-btn button:disabled, #search-btn button:disabled,
+button#upload-start-btn:disabled, button#camera-start-btn:disabled, button#search-btn:disabled {
+  color:#fff !important; -webkit-text-fill-color:#fff !important; opacity:.58 !important;
+}
+#search-btn { min-width:96px !important; min-height:46px !important; height:46px !important; }
+#search-btn button, button#search-btn { min-height:46px !important; height:46px !important; font-size:15px !important; }
+.search-panel, .search-panel.form, .search-panel > .form {
+  justify-content:flex-start !important; align-content:flex-start !important;
+  align-items:stretch !important;
+}
+.search-panel > * { flex-grow:0 !important; flex-shrink:0 !important; }
+#search-controls { width:100% !important; flex:0 0 auto !important; align-self:stretch !important;
+  align-items:flex-start !important; gap:12px !important; margin:0 !important; }
+#search-query { min-height:46px !important; margin:0 !important; padding:0 !important;
+  border:0 !important; outline:0 !important; background:transparent !important;
+  box-shadow:none !important; }
+#search-query > .form, #search-query .form {
+  padding:0 !important; border:0 !important; outline:0 !important;
+  background:transparent !important; box-shadow:none !important;
+}
+#search-query textarea, #search-query input {
+  min-height:46px !important;
+  padding-left:13px !important;
+  color:#0f172a !important; -webkit-text-fill-color:#0f172a !important;
+  background:#fff !important; border-color:#cbd5e1 !important;
+  opacity:1 !important;
+}
+#search-query textarea::placeholder, #search-query input::placeholder {
+  color:#64748b !important; -webkit-text-fill-color:#64748b !important;
+  opacity:1 !important;
+}
+#search-feedback { flex:0 0 auto !important; min-height:0 !important;
+  margin:0 !important; padding-left:2px !important; }
+#search-feedback > .prose { margin:8px 0 0 !important; padding:0 !important; }
+#search-result-list { flex:0 0 auto !important; align-self:stretch !important; margin-top:8px !important; }
 textarea:focus, input:focus { border-color:#818cf8 !important; box-shadow:0 0 0 3px rgba(99,102,241,.12) !important; }
 .compact-status .status-line { display:inline-flex; padding:7px 11px; border:1px solid #e0e7ff;
-  border-radius:999px; background:linear-gradient(90deg,rgba(238,242,255,.9),rgba(240,249,255,.9)); }
+  border-radius:999px; background:linear-gradient(90deg,rgba(238,242,255,.9),rgba(240,249,255,.9));
+  color:#334155 !important; -webkit-text-fill-color:#334155 !important;
+  font-size:15px !important; font-weight:700 !important; }
+.compact-status .status-line *, #status-display .status-line * {
+  color:inherit !important; -webkit-text-fill-color:currentColor !important;
+  opacity:1 !important; visibility:visible !important;
+}
+#status-display { min-width:180px !important; min-height:52px !important;
+  display:flex !important; align-items:center !important; }
 .panel-card .prose { color:#475569 !important; }
 .media-frame { width:min(100%,800px) !important; height:450px !important; margin:0 auto !important;
   aspect-ratio:16/9 !important; border:1px solid #c7d2fe !important;
   border-radius:14px !important; overflow:hidden !important; background:#fff !important;
   box-shadow:0 12px 32px rgba(30,64,175,.10) !important; }
 .media-frame > div { height:100% !important; background:#fff !important; }
+.media-frame [data-testid="video"], .media-frame .upload-container,
+.media-frame button[aria-label*="上传"], .media-frame button[aria-label*="upload" i] {
+  background:#fff !important; color:#475569 !important;
+  -webkit-text-fill-color:#475569 !important;
+}
+.media-frame p, .media-frame span:not(.icon), .media-frame button {
+  color:#475569 !important; -webkit-text-fill-color:#475569 !important;
+  opacity:1 !important;
+}
 .media-frame video,
 .media-frame img { display:block !important; width:100% !important; height:100% !important;
   object-fit:cover !important; vertical-align:top !important; }
+.media-frame video { accent-color:#6366f1 !important; }
+.media-frame video::-webkit-media-controls-panel {
+  background:linear-gradient(to top,rgba(49,46,129,.88),rgba(79,70,229,.28)) !important;
+}
+.media-frame video::-webkit-media-controls-timeline {
+  background-color:rgba(224,231,255,.72) !important; border-radius:999px !important;
+}
+.media-frame .icon-button-wrapper.top-panel {
+  display:flex !important; flex-direction:row !important; align-items:center !important;
+  width:auto !important; min-width:44px !important; height:44px !important;
+  min-height:44px !important; padding:0 !important; --bg-color:transparent !important;
+  background:transparent !important; border:0 !important; box-shadow:none !important;
+}
+.media-frame .icon-button-wrapper.top-panel > button,
+.media-frame button[aria-label="清除"], .media-frame button[aria-label="Clear"] {
+  display:flex !important; align-items:center !important; justify-content:center !important;
+  width:44px !important; min-width:44px !important; height:44px !important;
+  min-height:44px !important; padding:10px !important; --bg-color:transparent !important;
+  background:transparent !important; border:0 !important; box-shadow:none !important;
+}
+.media-frame .icon-button-wrapper.top-panel > button:not([aria-label="清除"]):not([aria-label="Clear"]) {
+  display:none !important;
+}
+.media-frame progress {
+  color:#0f172a !important; accent-color:#0f172a !important;
+  background:#fff !important; border:0 !important;
+  border-radius:999px !important; overflow:hidden !important;
+}
+.media-frame progress::-webkit-progress-bar {
+  background:#fff !important; border-radius:999px !important;
+}
+.media-frame progress::-webkit-progress-value {
+  background:#0f172a !important; border-radius:999px !important;
+}
+.media-frame progress::-moz-progress-bar {
+  background:#0f172a !important; border-radius:999px !important;
+}
+.media-frame .controls,
+.media-frame .controls .inner {
+  background:#fff !important;
+  color:#0f172a !important;
+}
+.media-frame .controls {
+  border-top:1px solid #e2e8f0 !important;
+  box-shadow:none !important;
+}
+.media-frame .controls button,
+.media-frame .controls .icon,
+.media-frame .controls .time,
+.media-frame .controls span,
+.media-frame .controls svg {
+  color:#0f172a !important;
+  -webkit-text-fill-color:#0f172a !important;
+}
+.media-frame .controls svg {
+  stroke:currentColor !important;
+}
 .media-frame button[aria-label*="Trim"],
 .media-frame button[aria-label*="trim"],
 .media-frame button[aria-label*="剪辑"],
@@ -268,14 +493,25 @@ textarea:focus, input:focus { border-color:#818cf8 !important; box-shadow:0 0 0 
 .media-frame button[title*="Trim"],
 .media-frame button[title*="Reset"] { display:none !important; }
 .browser-camera-shell { position:relative; width:min(100%,800px); aspect-ratio:16/9; margin:0 auto;
-  overflow:hidden; border:1px solid #c7d2fe; border-radius:14px; background:#0f172a;
+  overflow:hidden; border:1px solid #c7d2fe; border-radius:14px; background:#f8faff;
   box-shadow:0 12px 32px rgba(30,64,175,.10); }
-.browser-camera-shell video { width:100%; height:100%; display:block; object-fit:cover; background:#0f172a; }
-.browser-camera-empty { position:absolute; inset:0; display:grid; place-items:center; color:#94a3b8;
-  font-size:14px; pointer-events:none; }
+.browser-camera-shell video { width:100%; height:100%; display:block; object-fit:cover; background:#f8faff; }
+.browser-camera-empty { position:absolute; inset:0; display:grid; place-items:center; color:#475569 !important;
+  -webkit-text-fill-color:#475569 !important; background:#f8faff; font-size:14px; font-weight:600;
+  pointer-events:none; }
 .compact-status { min-height:0 !important; padding:0 !important; }
-.event-list { border:0 !important; background:transparent !important; }
-.event-list fieldset { display:grid !important; grid-template-columns:minmax(0,1fr) !important; gap:10px !important; width:100% !important; }
+.event-list, .event-list *, .event-list > div, .event-list > .form, .event-list .form,
+.event-list .wrap, .event-list fieldset {
+  border:0 !important; outline:0 !important; background:transparent !important;
+  box-shadow:none !important;
+}
+.panel-card > .form:has(> .event-list),
+#search-controls > .form {
+  border:0 !important; background:transparent !important; box-shadow:none !important;
+}
+.event-list { padding:0 !important; margin:0 !important; }
+.event-list fieldset { display:grid !important; grid-template-columns:minmax(0,1fr) !important;
+  gap:10px !important; width:100% !important; padding:0 !important; margin:0 !important; }
 .event-list label { display:block !important; margin:0 0 10px !important; padding:14px 16px !important;
   border:1px solid #dbeafe !important; border-radius:14px !important;
   background:linear-gradient(135deg,#fff,#f8faff) !important;
@@ -288,8 +524,10 @@ textarea:focus, input:focus { border-color:#818cf8 !important; box-shadow:0 0 0 
 .event-list input,
 .event-list input[type="radio"] { display:none !important; appearance:none !important; width:0 !important; height:0 !important; margin:0 !important; }
 .event-list label span { display:block !important; white-space:pre-line !important; color:#64748b !important;
-  font-size:12px !important; line-height:1.65 !important; }
-.event-list label span::first-line { color:#172554 !important; font-size:17px !important; font-weight:800 !important; line-height:1.9 !important; }
+  font-size:14px !important; font-weight:400 !important; line-height:1.75 !important; }
+.event-list label span::first-line { color:#0f172a !important;
+  -webkit-text-fill-color:#0f172a !important; font-size:17px !important;
+  font-weight:800 !important; line-height:1.9 !important; }
 .event-list label::before,
 .event-list label::after,
 .event-list label span::before,
@@ -299,23 +537,54 @@ textarea:focus, input:focus { border-color:#818cf8 !important; box-shadow:0 0 0 
 .event-list label .checkmark { display:none !important; content:none !important; }
 .toast-title { display:none !important; }
 #replay-modal { position:fixed !important; inset:0 !important; z-index:9999 !important;
-  padding:0 !important; background:rgba(15,23,42,.62) !important; backdrop-filter:blur(5px); }
+  padding:0 !important; background:rgba(226,232,240,.84) !important; backdrop-filter:blur(5px); }
 #replay-dialog { position:absolute !important; left:50% !important; top:50% !important;
   transform:translate(-50%,-50%) !important; width:min(800px,calc(100vw - 32px)) !important;
   max-height:calc(100vh - 32px) !important; margin:0 !important; padding:8px !important; gap:6px !important;
   border:1px solid #bfdbfe !important; border-radius:14px !important;
   background:linear-gradient(135deg,#eef2ff,#eaf6ff) !important;
   box-shadow:0 24px 70px rgba(15,23,42,.38) !important; overflow:hidden !important; }
-#replay-dialog > .form { gap:6px !important; }
+#replay-dialog > .form, #replay-dialog .form {
+  gap:6px !important; background:transparent !important; border:0 !important;
+  box-shadow:none !important;
+}
+#replay-dialog > div, #replay-dialog [data-testid="video"] {
+  color:#0f172a !important; background:transparent !important;
+}
 #replay-dialog .section-head { margin:0 !important; }
 #replay-dialog .section-eyebrow,
 #replay-dialog .section-desc-new { display:none !important; }
 #replay-dialog .section-title-new { margin:0 !important; padding-left:4px; font-size:17px !important; }
-#replay-dialog button { min-width:64px !important; max-width:64px !important; min-height:32px !important; }
+#close-replay-btn button, button#close-replay-btn {
+  min-width:64px !important; max-width:64px !important; min-height:32px !important;
+}
+#replay-dialog .controls button {
+  width:32px !important; min-width:32px !important; max-width:32px !important;
+  height:32px !important; min-height:32px !important; padding:5px !important;
+}
+#replay-dialog .controls button svg {
+  width:20px !important; height:20px !important;
+}
 #replay-dialog video { display:block !important; width:100% !important; max-height:calc(100vh - 94px) !important;
   object-fit:contain !important; border-radius:9px !important; background:#000 !important; }
 #replay-dialog [data-testid="video"] { margin:0 !important; padding:0 !important; border:0 !important; }
 footer { display:none !important; }
+@media (max-width: 768px) {
+  .gradio-container,
+  body > gradio-app .gradio-container,
+  gradio-app .gradio-container {
+    width:calc(100% - 16px) !important; padding:18px 10px 40px !important;
+  }
+  .app-header { align-items:flex-start !important; gap:12px !important; }
+  .judge-pill { display:none !important; }
+  .app-title { font-size:20px !important; }
+  .panel-card { padding:15px !important; border-radius:16px !important; }
+  .media-frame { height:auto !important; min-height:220px !important; }
+  #status-display { min-width:130px !important; }
+  .summary-layout { grid-template-columns:minmax(0,1fr); }
+  .summary-chart { justify-content:flex-start; padding:18px 0 0; border-left:0;
+    border-top:1px solid rgba(99,102,241,.16); }
+}
 """
 
 CAMERA_OPEN_JS = """async () => {
@@ -413,18 +682,192 @@ def section_head(eyebrow: str, title: str, description: str) -> str:
     )
 
 
-def summary_html(summary: str = "") -> str:
+_SUMMARY_CHART_COLORS = {
+    "sit_at_study_position": "#6366f1",
+    "leave_study_position": "#64748b",
+    "reading": "#0ea5e9",
+    "writing": "#8b5cf6",
+    "phone_usage": "#f59e0b",
+    "computer_usage": "#2563eb",
+    "communication_distraction": "#ef4444",
+    "other_behavior": "#94a3b8",
+}
+
+
+def _format_second_value(value: float) -> str:
+    rounded = round(max(0.0, float(value)), 2)
+    if rounded.is_integer():
+        return str(int(rounded))
+    return f"{rounded:.2f}".rstrip("0").rstrip(".")
+
+
+def _format_display_time(seconds: float) -> str:
+    """将秒数转换为适合中文界面展示的秒、分或小时格式。"""
+    total = round(max(0.0, float(seconds)), 2)
+    hours = int(total // 3600)
+    remainder = total - hours * 3600
+    minutes = int(remainder // 60)
+    remaining_seconds = remainder - minutes * 60
+    second_text = _format_second_value(remaining_seconds)
+    if hours:
+        parts = [f"{hours}小时"]
+        if minutes:
+            parts.append(f"{minutes}分")
+        if remaining_seconds > 0:
+            parts.append(f"{second_text}秒")
+        return "".join(parts)
+    if minutes:
+        result = f"{minutes}分"
+        if remaining_seconds > 0:
+            result += f"{second_text}秒"
+        return result
+    return f"{_format_second_value(total)}秒"
+
+
+def _parse_display_time(value: str) -> float | None:
+    """解析新中文时间格式及旧版 ``12.34s`` 格式。"""
+    text = str(value or "").strip()
+    old_match = re.fullmatch(r"([0-9.]+)s", text, flags=re.IGNORECASE)
+    if old_match:
+        return float(old_match.group(1))
+    match = re.fullmatch(
+        r"(?:(\d+)小时)?(?:(\d+)分)?(?:([0-9.]+)秒)?",
+        text,
+    )
+    if not match or not any(match.groups()):
+        return None
+    hours = float(match.group(1) or 0)
+    minutes = float(match.group(2) or 0)
+    seconds = float(match.group(3) or 0)
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def _summary_distribution(records) -> tuple[float, list[dict]]:
+    if not records:
+        return 0.0, []
+    durations: dict[str, float] = {}
+    for record in records:
+        event_type = str(record.get("event_type", "other_behavior"))
+        duration = max(
+            0.0,
+            float(record.get("end_time", 0.0)) - float(record.get("start_time", 0.0)),
+        )
+        durations[event_type] = durations.get(event_type, 0.0) + duration
+    total = max(float(record.get("end_time", 0.0)) for record in records)
+    confirmed = sum(durations.values())
+    if total > confirmed + 0.01:
+        durations["unclassified"] = total - confirmed
+    colors = {**_SUMMARY_CHART_COLORS, "unclassified": "#cbd5e1"}
+    items = []
+    for event_type, duration in durations.items():
+        if duration <= 0 or total <= 0:
+            continue
+        items.append({
+            "event_type": event_type,
+            "label": "未分类时段" if event_type == "unclassified" else event_label(event_type),
+            "duration": duration,
+            "percentage": duration / total * 100.0,
+            "color": colors.get(event_type, "#94a3b8"),
+        })
+    return total, items
+
+
+def _summary_records_from_choices(choices) -> list[dict]:
+    """兼容旧版 UI 状态：从时间线显示文字恢复统计所需的最小字段。"""
+    label_to_event = {
+        event_label(event_type): event_type
+        for event_type in _SUMMARY_CHART_COLORS
+    }
+    records = []
+    for choice in choices or []:
+        display = choice[0] if isinstance(choice, (list, tuple)) and choice else choice
+        lines = str(display or "").splitlines()
+        if len(lines) < 2 or lines[0].strip() not in label_to_event:
+            continue
+        time_parts = re.split(r"\s*[–—]\s*", lines[1], maxsplit=1)
+        if len(time_parts) != 2:
+            continue
+        start_time = _parse_display_time(time_parts[0])
+        end_time = _parse_display_time(time_parts[1])
+        if start_time is None or end_time is None:
+            continue
+        records.append({
+            "start_time": start_time,
+            "end_time": end_time,
+            "event_type": label_to_event[lines[0].strip()],
+        })
+    return records
+
+
+def _normalize_timeline_choice_times(choices):
+    """将持久化的旧时间线文字升级为当前中文时间格式。"""
+    normalized = []
+    for choice in choices or []:
+        if isinstance(choice, (list, tuple)) and choice:
+            display = choice[0]
+            value = choice[1] if len(choice) > 1 else choice[0]
+        else:
+            display = choice
+            value = choice
+        lines = str(display or "").splitlines()
+        if len(lines) >= 2:
+            time_parts = re.split(r"\s*[–—]\s*", lines[1], maxsplit=1)
+            if len(time_parts) == 2:
+                start_time = _parse_display_time(time_parts[0])
+                end_time = _parse_display_time(time_parts[1])
+                if start_time is not None and end_time is not None:
+                    lines[1] = (
+                        f"{_format_display_time(start_time)} – "
+                        f"{_format_display_time(end_time)}"
+                    )
+        normalized.append(("\n".join(lines), value))
+    return normalized
+
+
+def summary_html(summary: str = "", records=None) -> str:
     content = html.escape(summary.strip()) if summary.strip() else (
         '<span class="summary-empty">分析完成后，这里将生成覆盖全部事件的综合描述。</span>'
     )
-    return f'<div class="summary-box">{content}</div>'
+    total, distribution = _summary_distribution(records or [])
+    if not distribution:
+        return (
+            '<div class="summary-box"><div class="summary-layout no-chart">'
+            f'<div class="summary-copy">{content}</div></div></div>'
+        )
+    start = 0.0
+    sectors = []
+    legend = []
+    for item in distribution:
+        end = start + item["percentage"] * 3.6
+        sectors.append(f'{item["color"]} {start:.2f}deg {end:.2f}deg')
+        legend.append(
+            '<div class="summary-legend-item">'
+            f'<span class="summary-legend-dot" style="background:{item["color"]}"></span>'
+            f'<span>{html.escape(item["label"])}</span>'
+            f'<span class="summary-legend-percentage">{item["percentage"]:.1f}%</span>'
+            f'<span class="summary-legend-duration">{_format_display_time(item["duration"])}</span>'
+            '</div>'
+        )
+        start = end
+    chart = (
+        '<div class="summary-chart">'
+        f'<div class="summary-pie" style="background:conic-gradient({",".join(sectors)})">'
+        '<div class="summary-pie-center"><span>总时长</span>'
+        f'<strong>{_format_display_time(total)}</strong></div></div>'
+        f'<div class="summary-legend">{"".join(legend)}</div></div>'
+    )
+    return (
+        '<div class="summary-box"><div class="summary-layout">'
+        f'<div class="summary-copy">{content}</div>{chart}</div></div>'
+    )
 
 
 def _event_choices(records):
     return [
         (
             f"{event_label(item['event_type'])}\n"
-            f"{item['start_time']:.2f}s – {item['end_time']:.2f}s\n"
+            f"{_format_display_time(item['start_time'])} – "
+            f"{_format_display_time(item['end_time'])}\n"
             f"{item['caption']}",
             str(item.get("video_path", "")),
         )
@@ -520,18 +963,30 @@ def on_restore():
     state = saved.get("state")
     if state == "completed":
         ready = bool(saved.get("ready"))
+        timeline_choices = _normalize_timeline_choice_times(
+            saved.get("timeline_choices", [])
+        )
+        summary_records = saved.get("summary_records") or _summary_records_from_choices(
+            timeline_choices
+        )
+        restored_summary = str(saved.get("video_summary", ""))
+        if summary_records:
+            restored_summary = EndToEndRunner._fallback_video_summary(summary_records)
         return (
             saved.get("status_html", status_html("done")),
-            summary_html(str(saved.get("video_summary", ""))),
+            summary_html(
+                restored_summary,
+                summary_records,
+            ),
             gr.update(
-                choices=saved.get("timeline_choices", []),
+                choices=timeline_choices,
                 value=None,
-                visible=bool(saved.get("timeline_choices", [])),
+                visible=bool(timeline_choices),
             ),
             gr.update(
                 interactive=ready,
                 placeholder=(
-                    "例如：刚才什么时候阅读了？"
+                    "输入搜索内容"
                     if ready else "最近一次分析没有产生可检索事件"
                 ),
             ),
@@ -652,6 +1107,14 @@ def on_start(input_mode, video_path):
 
     timeline_choices = _event_choices(records)
     video_summary = str(result.get("video_summary", "")).strip()
+    summary_records = [
+        {
+            "start_time": float(record["start_time"]),
+            "end_time": float(record["end_time"]),
+            "event_type": str(record["event_type"]),
+        }
+        for record in records
+    ]
     ready = bool(records)
     completed_status = status_html("done")
     _persist_ui_state(
@@ -661,6 +1124,7 @@ def on_start(input_mode, video_path):
         ready=ready,
         status_html=completed_status,
         video_summary=video_summary,
+        summary_records=summary_records,
         timeline_choices=timeline_choices,
     )
     print(
@@ -669,7 +1133,7 @@ def on_start(input_mode, video_path):
         f"错误 {len(result['errors'])} 个 | 页面状态已保存到 {UI_STATE_PATH}"
     )
     yield (
-        completed_status, summary_html(video_summary),
+        completed_status, summary_html(video_summary, summary_records),
         gr.update(
             choices=timeline_choices,
             value=None,
@@ -678,7 +1142,7 @@ def on_start(input_mode, video_path):
         gr.update(
             interactive=ready,
             placeholder=(
-                "例如：刚才什么时候阅读了？"
+                "输入搜索内容"
                 if ready else "本次分析没有产生可检索的确认事件"
             ),
         ),
@@ -709,14 +1173,15 @@ def build_ui() -> gr.Blocks:
             upload_mode = gr.State("上传视频")
             camera_mode = gr.State("本机摄像头")
             empty_video = gr.State(None)
-            with gr.Tabs():
+            with gr.Tabs(elem_classes=["tab-nav"]):
                 with gr.Tab("上传视频") as upload_tab:
                     video_input = gr.Video(
                         sources=["upload"], label=None, height=450,
                         elem_classes=["media-frame"],
                     )
                     upload_start_btn = gr.Button(
-                        "开始分析", variant="primary", elem_classes=["primary"]
+                        "开始分析", variant="primary", elem_id="upload-start-btn",
+                        elem_classes=["primary"]
                     )
                 with gr.Tab("实时摄像头") as camera_tab:
                     gr.HTML(
@@ -730,15 +1195,21 @@ def build_ui() -> gr.Blocks:
                         elem_classes=["media-frame", "analysis-camera-frame"],
                     )
                     camera_start_btn = gr.Button(
-                        "开始分析", variant="primary", elem_classes=["primary"]
+                        "开始分析", variant="primary", elem_id="camera-start-btn",
+                        elem_classes=["primary"]
                     )
             with gr.Row(equal_height=True):
-                stop_btn = gr.Button("停止", elem_classes=["secondary"])
-                restore_btn = gr.Button("恢复最近结果", elem_classes=["secondary"])
-                status = gr.HTML(status_html("idle"), elem_classes=["compact-status"])
+                stop_btn = gr.Button("停止", elem_id="stop-btn", elem_classes=["secondary"])
+                restore_btn = gr.Button(
+                    "恢复最近结果", elem_id="restore-btn", elem_classes=["secondary"]
+                )
+                status = gr.HTML(
+                    status_html("idle"), elem_id="status-display",
+                    elem_classes=["compact-status"],
+                )
 
         with gr.Column(elem_classes=["panel-card"]):
-            gr.HTML(section_head("OVERVIEW", "全事件总结", "千问综合全部已确认事件与逐事件描述生成。"))
+            gr.HTML(section_head("OVERVIEW", "全事件总结", "按照已确认事件及其时间顺序生成客观过程描述。"))
             summary_panel = gr.HTML(summary_html())
 
         with gr.Row(equal_height=True):
@@ -746,31 +1217,36 @@ def build_ui() -> gr.Blocks:
                 gr.HTML(section_head("TIMELINE", "具体事件时间线", "点击事件即可打开对应回放。"))
                 timeline_list = gr.Radio(
                     choices=[], value=None, label=None, show_label=False, visible=False,
-                    elem_classes=["event-list"],
+                    elem_id="timeline-list", elem_classes=["event-list"],
                 )
 
-            with gr.Column(scale=1, elem_classes=["panel-card"]):
+            with gr.Column(scale=1, elem_classes=["panel-card", "search-panel"]):
                 gr.HTML(section_head("SEARCH", "自然语言搜索", "例如：什么时候阅读了？"))
-                with gr.Row():
+                with gr.Row(equal_height=True, elem_id="search-controls"):
                     query = gr.Textbox(
                         placeholder="请先完成视频分析", label=None, show_label=False,
-                        interactive=False, scale=5,
+                        interactive=False, scale=5, elem_id="search-query",
                     )
                     search_btn = gr.Button(
                         "搜索", scale=1, variant="primary",
-                        interactive=False, elem_classes=["primary"],
+                        interactive=False, elem_id="search-btn", elem_classes=["primary"],
                     )
-                search_feedback = gr.Markdown(value="", visible=False)
+                search_feedback = gr.Markdown(
+                    value="", visible=False, elem_id="search-feedback"
+                )
                 search_results = gr.Radio(
                     choices=[], value=None, label=None, show_label=False, visible=False,
-                    elem_classes=["event-list"],
+                    elem_id="search-result-list", elem_classes=["event-list"],
                 )
 
         with gr.Group(visible=False, elem_id="replay-modal") as replay_modal:
             with gr.Column(elem_id="replay-dialog"):
                 with gr.Row():
                     gr.HTML(section_head("REPLAY", "事件回放", "当前选中事件的视频片段"))
-                    close_replay_btn = gr.Button("关闭", size="sm", elem_classes=["secondary"])
+                    close_replay_btn = gr.Button(
+                        "关闭", size="sm", elem_id="close-replay-btn",
+                        elem_classes=["secondary"],
+                    )
                 replay_video = gr.Video(label=None, interactive=False, visible=False)
         # ---- 事件绑定 ----
         video_input.upload(on_video_upload, inputs=video_input, outputs=video_input, show_progress="hidden")
@@ -849,6 +1325,6 @@ if __name__ == "__main__":
     print("[日志] 终端输出同步写入 UTF-8 result.txt")
     build_ui().launch(
         allowed_paths=[str(Path(PROJECT_ROOT) / "data")],
-        theme=gr.themes.Soft(primary_hue="blue", neutral_hue="slate"),
+        theme=APP_THEME,
         css=CSS + PRESENTATION_CSS,
     )

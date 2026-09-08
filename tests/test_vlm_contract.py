@@ -43,6 +43,10 @@ def test_video_summary_prompt_contains_ordered_event_facts():
     assert "2.00s-10.00s | 阅读 | 人物持续阅读书本。" in prompt
     assert "10.00s-18.00s | 书写 | 人物开始落笔书写。" in prompt
     assert "不得虚构" in prompt
+    assert "不扩写、不润色" in prompt
+    assert "可能、似乎" in prompt
+    assert "兴趣、态度、习惯" in prompt
+    assert "只能概括一次" in prompt
     assert "直接输出总结正文" in prompt
 
 

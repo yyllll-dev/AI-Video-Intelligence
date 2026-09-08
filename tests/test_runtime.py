@@ -107,6 +107,77 @@ def test_full_runtime_reaches_memory_and_retrieval(tmp_path):
     assert len(summarized_records) == result["memories_saved"]
 
 
+def test_objective_video_summary_uses_only_confirmed_event_facts():
+    summary = EndToEndRunner._fallback_video_summary([
+        {
+            "start_time": 0.0,
+            "end_time": 4.0,
+            "event_type": "reading",
+            "caption": "人物可能对知识有浓厚兴趣，表现出认真态度。",
+        },
+        {
+            "start_time": 4.0,
+            "end_time": 8.0,
+            "event_type": "computer_usage",
+            "caption": "人物似乎养成了良好的学习习惯。",
+        },
+    ])
+
+    assert summary == (
+        "视频中，人物先阅读，随后使用电脑。"
+    )
+    for unsupported in ("可能", "似乎", "兴趣", "态度", "习惯"):
+        assert unsupported not in summary
+
+
+def test_objective_video_summary_describes_transitions_naturally():
+    summary = EndToEndRunner._fallback_video_summary([
+        {"start_time": 0.0, "end_time": 2.0, "event_type": "sit_at_study_position"},
+        {"start_time": 2.0, "end_time": 5.0, "event_type": "other_behavior"},
+        {"start_time": 5.0, "end_time": 9.0, "event_type": "reading"},
+        {"start_time": 9.0, "end_time": 12.0, "event_type": "other_behavior"},
+        {"start_time": 12.0, "end_time": 15.0, "event_type": "computer_usage"},
+    ])
+
+    assert summary == (
+        "视频中，人物先坐到学习位置，随后阅读，最后使用电脑；"
+        "过程中还包含学习准备、整理或动作切换。"
+    )
+    assert "后，人物" not in summary
+    assert "视频全程" not in summary
+    assert "时长占比" not in summary
+
+
+def test_objective_video_summary_collapses_repeated_other_windows():
+    summary = EndToEndRunner._fallback_video_summary([
+        {"start_time": 0.0, "end_time": 2.0, "event_type": "sit_at_study_position"},
+        {"start_time": 2.0, "end_time": 5.0, "event_type": "other_behavior"},
+        {"start_time": 5.0, "end_time": 8.0, "event_type": "reading"},
+        {"start_time": 8.0, "end_time": 10.0, "event_type": "other_behavior"},
+        {"start_time": 10.0, "end_time": 12.0, "event_type": "other_behavior"},
+        {"start_time": 12.0, "end_time": 15.0, "event_type": "other_behavior"},
+    ])
+
+    assert summary == (
+        "视频中，人物先坐到学习位置，随后阅读；"
+        "过程中还包含学习准备、整理或动作切换。"
+    )
+    assert summary.count("准备、整理或动作切换") == 1
+
+
+def test_repetitive_other_summary_is_rejected():
+    assert not EndToEndRunner._is_objective_video_summary(
+        "人物进行准备、整理或动作切换，之后再次进行准备、整理或动作切换。"
+    )
+
+
+def test_non_objective_custom_summary_is_rejected():
+    assert EndToEndRunner._is_objective_video_summary("人物先阅读，随后书写。")
+    assert not EndToEndRunner._is_objective_video_summary(
+        "人物阅读，显示出对知识的浓厚兴趣。"
+    )
+
+
 def test_realtime_runner_records_and_creates_event_replay(tmp_path):
     runner = EndToEndRunner(
         source=CameraSource(),

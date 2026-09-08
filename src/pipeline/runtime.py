@@ -22,7 +22,6 @@ from ..event.schemas import Event
 from ..retrieval import HashingEmbedder, InMemoryStore, VideoMemoryService
 from ..tracking.tracker import SimpleTracker
 from ..vlm.inference import (
-    analyze_video_summary,
     analyze_event,
     analyze_first_transition_frame,
     analyze_frame_labels,
@@ -36,7 +35,6 @@ from ..vlm.inference import (
     should_persist_to_memory,
 )
 from ..vlm.qwen_vlm import load_model
-from ..vlm.prompt import EVENT_TYPE_CN
 from .frame_stream import FrameStream
 from .media_archive import (
     FileKeyframeExtractor,
@@ -54,6 +52,35 @@ PositionAnalyzer = Callable[[list[str], str], dict[str, Any]]
 WindowLabelAnalyzer = Callable[[list[str]], dict[str, Any]]
 TransitionFrameAnalyzer = Callable[[list[str], str, str], dict[str, Any]]
 SummaryAnalyzer = Callable[[list[dict[str, Any]]], str]
+
+_SUMMARY_ACTION_CN = {
+    "sit_at_study_position": "坐到学习位置",
+    "leave_study_position": "离开学习位置",
+    "reading": "阅读",
+    "writing": "书写",
+    "phone_usage": "使用手机",
+    "computer_usage": "使用电脑",
+    "communication_distraction": "与他人交流",
+}
+
+_NON_OBJECTIVE_SUMMARY_TERMS = (
+    "可能",
+    "似乎",
+    "也许",
+    "或许",
+    "大概",
+    "推测",
+    "看起来",
+    "显示出",
+    "表明",
+    "体现",
+    "兴趣",
+    "态度",
+    "习惯",
+    "专注力",
+    "学习效果",
+    "确保",
+)
 
 _VLM_EVENT_TYPES = frozenset(ALL_EVENTS)
 _BEHAVIOR_EVENT_TYPES = frozenset(
@@ -2444,38 +2471,85 @@ class EndToEndRunner:
             self._active_stream.stop()
 
     @staticmethod
+    def _summary_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """按时间排序并合并相邻同类窗口，供全事件总结使用。"""
+        ordered = sorted(records, key=lambda item: float(item["start_time"]))
+        merged: list[dict[str, Any]] = []
+        for record in ordered:
+            current = dict(record)
+            if merged and str(merged[-1].get("event_type")) == str(
+                current.get("event_type")
+            ):
+                merged[-1]["end_time"] = max(
+                    float(merged[-1]["end_time"]),
+                    float(current["end_time"]),
+                )
+                if not str(merged[-1].get("caption", "")).strip():
+                    merged[-1]["caption"] = current.get("caption", "")
+                continue
+            merged.append(current)
+        return merged
+
+    @staticmethod
     def _fallback_video_summary(records: list[dict[str, Any]]) -> str:
         if not records:
             return "本次视频中没有确认到可总结的具体事件。"
-        parts = [
-            f"{float(record['start_time']):.1f}至{float(record['end_time']):.1f}秒"
-            f"{EVENT_TYPE_CN.get(str(record['event_type']), str(record['event_type']))}，"
-            f"{str(record.get('caption', '')).strip()}"
-            for record in records
+        ordered = EndToEndRunner._summary_records(records)
+        event_types = [str(record["event_type"]) for record in ordered]
+        has_other = "other_behavior" in event_types
+        actions = [
+            _SUMMARY_ACTION_CN[event_type]
+            for event_type in event_types
+            if event_type in _SUMMARY_ACTION_CN
         ]
-        return "视频中，" + "；随后，".join(parts) + "。"
+
+        if not actions:
+            return "视频中，人物进行了学习准备、整理或动作切换。"
+        if len(actions) == 1:
+            process = f"视频中，人物{actions[0]}"
+        elif len(actions) == 2:
+            process = f"视频中，人物先{actions[0]}，随后{actions[1]}"
+        elif len(actions) == 3:
+            process = (
+                f"视频中，人物先{actions[0]}，随后{actions[1]}，"
+                f"最后{actions[2]}"
+            )
+        elif len(actions) == 4:
+            process = (
+                f"视频中，人物先{actions[0]}，随后{actions[1]}，"
+                f"接着{actions[2]}，最后{actions[3]}"
+            )
+        else:
+            process = "视频中，人物依次" + "、".join(actions[:-1]) + f"和{actions[-1]}"
+
+        if has_other:
+            return process + "；过程中还包含学习准备、整理或动作切换。"
+        return process + "。"
+
+    @staticmethod
+    def _is_objective_video_summary(summary: str) -> bool:
+        text = str(summary or "").strip()
+        if not text or any(term in text for term in _NON_OBJECTIVE_SUMMARY_TERMS):
+            return False
+        repeated_other_phrases = (
+            "准备、整理或动作切换",
+            "准备、整理和动作切换",
+        )
+        return not any(text.count(phrase) > 1 for phrase in repeated_other_phrases)
 
     def _generate_video_summary(self) -> str:
-        records = [record.to_dict() for record in self.memory_store.list_all()]
+        records = self._summary_records(
+            [record.to_dict() for record in self.memory_store.list_all()]
+        )
         if not records:
             return self._fallback_video_summary(records)
+        # 正式产品路径使用结构化事件直接生成总结，确保总结不能扩写出
+        # 兴趣、态度、身份、原因或画面中没有发生的动作。
+        if self.summary_analyzer is None:
+            return self._fallback_video_summary(records)
         try:
-            if self.summary_analyzer is not None:
-                summary = self.summary_analyzer(records).strip()
-            elif (
-                self.use_vlm
-                and self._vlm_model is not None
-                and self._vlm_processor is not None
-            ):
-                self.vlm_summary_calls += 1
-                summary = analyze_video_summary(
-                    self._vlm_model,
-                    self._vlm_processor,
-                    records,
-                ).strip()
-            else:
-                summary = ""
-            if summary:
+            summary = self.summary_analyzer(records).strip()
+            if self._is_objective_video_summary(summary):
                 return summary
         except Exception as exc:
             self.errors.append(f"全事件总结失败: {exc}")
